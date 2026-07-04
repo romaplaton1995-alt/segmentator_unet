@@ -1,0 +1,23 @@
+services:
+  backend:
+    build: ./backend
+    container_name: brats_backend
+    volumes:
+      - ./weights:/app/weights:ro
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  frontend:
+    build: ./frontend
+    container_name: brats_frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend

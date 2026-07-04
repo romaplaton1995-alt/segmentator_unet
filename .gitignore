@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Docker runtime folders
+backend/temp/
+backend/output/
+temp/
+output/
+
+# Medical data - DO NOT COMMIT
+*.nii
+*.nii.gz
+*.dcm
+*.dicom
+*.zip
+
+# Large model weights
+weights/*.pth
+weights/*.pt
+weights/*.ckpt
+weights/*.onnx
+
+# Keep weights folder structure
+!weights/.gitkeep
+
+# Environment files
+.env
+.env.*

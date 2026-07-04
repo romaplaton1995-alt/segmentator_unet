@@ -1,0 +1,24 @@
+.venv
+venv
+env
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.log
+.idea
+.vscode
+
+# Medical data
+*.nii
+*.nii.gz
+*.dcm
+*.dicom
+*.zip
+
+# Runtime output
+temp
+output
+backend/temp
+backend/output
