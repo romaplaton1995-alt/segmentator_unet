@@ -33,6 +33,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Session-Id"],
 )
 
 
@@ -132,6 +133,37 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.get("/volume/{session_id}")
+async def get_volume(session_id: str):
+    """
+    Возвращает FLAIR-объём из .npy файла (сохранённого при /predict).
+    Формат: { shape:[D,H,W], spacing:[1,1,1], data:[uint8,...] }
+    """
+    import numpy as np
+
+    npy_path = os.path.join(OUTPUT_DIR, f"{session_id}_flair.npy")
+    if not os.path.exists(npy_path):
+        raise HTTPException(status_code=404, detail="Данные объёма не найдены. Запустите анализ заново.")
+
+    data = np.load(npy_path).astype(np.float32)  # shape: (D, H, W)
+    D, H, W = data.shape
+
+    mn, mx = data.min(), data.max()
+    norm = ((data - mn) / (mx - mn + 1e-9) * 255).astype(np.uint8)
+
+    # Удаляем .npy после отдачи — он больше не нужен
+    try:
+        os.remove(npy_path)
+    except OSError:
+        pass
+
+    return {
+        "shape":   [int(D), int(H), int(W)],
+        "spacing": [1.0, 1.0, 1.0],
+        "data":    norm.flatten().tolist()
+    }
+
+
 @app.post("/predict")
 async def predict(
     flair: UploadFile = File(...),
@@ -204,6 +236,12 @@ async def predict(
             f"Размер маски: {mask.shape}, voxels={int(mask.sum())}"
         )
 
+        # Сохраняем FLAIR в OUTPUT_DIR — он не удаляется в finally
+        import numpy as np
+        flair_npy_path = os.path.join(OUTPUT_DIR, f"{session_id}_flair.npy")
+        np.save(flair_npy_path, flair_raw.astype(np.float32))
+        logger.info(f"FLAIR сохранён для /volume/: {flair_npy_path}")
+
         # ----------------------------------------------------
         # 3. Строим 3D-модель GLB
         # ----------------------------------------------------
@@ -228,11 +266,14 @@ async def predict(
         # 4. Возвращаем GLB во frontend
         # ----------------------------------------------------
 
-        return FileResponse(
+        from starlette.background import BackgroundTask
+        resp = FileResponse(
             output_path,
             media_type="model/gltf-binary",
             filename="tumor_reconstruction.glb"
         )
+        resp.headers["X-Session-Id"] = session_id
+        return resp
 
     except Exception as e:
         logger.error(f"Ошибка в сессии {session_id}: {str(e)}")
