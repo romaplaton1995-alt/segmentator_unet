@@ -3,8 +3,10 @@ import nibabel as nib
 import torch
 import torch.nn.functional as F
 import os
+import logging
 from model_unet import UNet3D
-from dicom_utils import load_dicom_from_zip
+
+logger = logging.getLogger("main")
 
 MODEL_PATH = "/app/weights/best_model.pth"
 PATCH_SIZE = (64, 128, 128)
@@ -16,6 +18,7 @@ _model = None
 def get_model():
     global _model
     if _model is None:
+        logger.info(f"Инициализация модели UNet3D на {DEVICE}")
         _model = UNet3D(in_channels=4, out_channels=1, base_features=16)
         _model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
         _model.to(DEVICE)
@@ -23,34 +26,56 @@ def get_model():
     return _model
 
 
-def load_any_format(file_path, temp_extract_dir):
-    if file_path.endswith('.zip'):
-        return load_dicom_from_zip(file_path, temp_extract_dir)
-    else:
-        # Для NIfTI SimpleITK возвращает (D, H, W), но nibabel возвращает (H, W, D)
-        data = nib.load(file_path).get_fdata(dtype=np.float32)
-        return np.transpose(data, (2, 0, 1))  # Приводим к (D, H, W)
+def load_nifti(file_path: str) -> np.ndarray:
+    """
+    Загружает .nii/.nii.gz и приводит к порядку осей (D, H, W),
+    так как nibabel по умолчанию возвращает (H, W, D).
+    """
+    if not file_path.lower().endswith(('.nii', '.nii.gz')):
+        raise ValueError(
+            f"Ожидался файл формата NIfTI (.nii/.nii.gz), получен: {file_path}. "
+            f"Сконвертируйте DICOM в NIfTI заранее (например, через dcm2niix или CaPTk)."
+        )
+    data = nib.load(file_path).get_fdata(dtype=np.float32)
+    return np.transpose(data, (2, 0, 1))  # (H, W, D) -> (D, H, W)
 
 
 def load_and_normalize(file_paths: dict, session_dir: str):
+    """
+    file_paths: {'flair': path, 't1': path, 't1ce': path, 't2': path}
+    Все пути должны указывать на .nii/.nii.gz файлы одинакового разрешения.
+    """
     imgs = []
     affine = np.eye(4)
 
     for m in ['flair', 't1', 't1ce', 't2']:
         path = file_paths[m]
-        extract_dir = os.path.join(session_dir, f"dicom_{m}")
-        vol = load_any_format(path, extract_dir)
+        vol = load_nifti(path)
 
-        if path.endswith(('.nii', '.nii.gz')) and m == 'flair':
-            # Оставляем оригинальный affine для NIfTI
+        if m == 'flair':
+            # Сохраняем оригинальную аффинную матрицу FLAIR как референс геометрии
             affine = nib.load(path).affine
 
         imgs.append(vol)
+        logger.info(f"{m}: загружен, shape(D,H,W)={vol.shape}")
 
-    # Теперь все волюмы гарантированно (D, H, W). Стакаем в (C, D, H, W)
-    image = np.stack(imgs, axis=0)
+    # Проверка согласованности форм перед стекингом —
+    # если файлы не выровнены заранее, здесь мы получим понятную ошибку,
+    # а не молчаливое искажение геометрии.
+    shapes = {m: img.shape for m, img in zip(['flair', 't1', 't1ce', 't2'], imgs)}
+    first_shape = imgs[0].shape
+    for m, s in shapes.items():
+        if s != first_shape:
+            raise ValueError(
+                f"Несовпадение форм модальностей: {shapes}. "
+                f"Все NIfTI-файлы должны быть приведены к единой сетке "
+                f"(co-registration) до загрузки в приложение."
+            )
+
+    image = np.stack(imgs, axis=0)  # (C, D, H, W)
     image_torch = torch.from_numpy(image.copy()).float()
 
+    # Z-score нормализация по каждому каналу, без учета фона
     for c in range(4):
         ch = image_torch[c]
         mask = ch > 0
@@ -90,8 +115,8 @@ def sliding_window_inference(model, image, patch_size=PATCH_SIZE, overlap=0.5):
 
     prob_map = prob_map / count_map
     return prob_map[:, :d - pad_d if pad_d else d,
-           :h - pad_h if pad_h else h,
-           :w - pad_w if pad_w else w]
+                        :h - pad_h if pad_h else h,
+                        :w - pad_w if pad_w else w]
 
 
 def run_inference(file_paths: dict, session_dir: str, threshold=0.5):
@@ -99,4 +124,6 @@ def run_inference(file_paths: dict, session_dir: str, threshold=0.5):
     image, affine, flair_raw = load_and_normalize(file_paths, session_dir)
     prob_map = sliding_window_inference(model, image)
     mask = (prob_map[0] >= threshold).cpu().numpy().astype(np.uint8)
+
+    logger.info(f"Инференс завершён: mask shape={mask.shape}, voxels={mask.sum()}")
     return mask, affine, flair_raw
