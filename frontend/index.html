@@ -2,68 +2,88 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<title>BraTS 3D Viewer — Solid Tumor</title>
+<title>BraTS 3D Viewer — Deep Slicing</title>
 <style>
   body { margin: 0; background: #f4f6f8; color: #222; font-family: sans-serif; overflow: hidden; }
+
   #upload-panel {
     position: absolute; top: 15px; left: 15px; z-index: 100;
-    background: rgba(255, 255, 255, 0.94); padding: 20px;
+    background: rgba(255, 255, 255, 0.96); padding: 18px;
     border-radius: 12px; border: 1px solid #d5dbe3;
-    width: 300px; box-shadow: 0 10px 30px rgba(0,0,0,0.12);
+    width: 280px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
   }
-  input[type="file"] { display: block; margin: 10px 0; width: 100%; font-size: 12px; }
+
+  input[type="file"] { display: block; margin: 8px 0; width: 100%; font-size: 11px; }
+
   button {
-    padding: 12px; width: 100%; cursor: pointer; background: #2563eb;
-    color: white; border: none; border-radius: 6px; font-weight: bold; margin-top: 10px;
+    padding: 10px; width: 100%; cursor: pointer; background: #2563eb;
+    color: white; border: none; border-radius: 6px; font-weight: bold; margin-bottom: 8px; font-size: 13px;
   }
-  #status { margin-top: 15px; font-size: 12px; color: #444; line-height: 1.4; }
-  .control-group { margin-top: 15px; padding-top: 12px; border-top: 1px solid #d5dbe3; }
+  button:hover { background: #1d4ed8; }
+
+  #status { margin-top: 12px; font-size: 11px; color: #444; line-height: 1.4; }
+
+  .control-group { margin-top: 12px; padding-top: 10px; border-top: 1px solid #d5dbe3; }
+  .control-group label { display: block; font-size: 11px; margin-bottom: 4px; cursor: pointer; font-weight: 500; }
+
   #slice-panel {
     position: absolute; top: 15px; right: 15px; z-index: 100;
-    background: rgba(255,255,255,0.94); padding: 16px;
+    background: rgba(255,255,255,0.96); padding: 12px;
     border-radius: 12px; border: 1px solid #d5dbe3;
-    width: 260px; box-shadow: 0 10px 30px rgba(0,0,0,0.12);
-    display: none; flex-direction: column; gap: 14px;
+    width: 190px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+    display: none; flex-direction: column; gap: 8px;
+    max-height: 95vh;
   }
+
+  .slice-title { font-size: 11px; font-weight: bold; color: #2563eb; text-transform: uppercase; text-align: center; }
+
   .slice-wrap {
-    position: relative; width: 220px; height: 220px;
-    background: #000; border-radius: 8px; overflow: hidden;
+    position: relative; width: 170px; height: 170px;
+    background: #000; border-radius: 6px; overflow: hidden;
+    border: 1px solid #ddd; margin: 0 auto;
   }
-  .slice-wrap canvas { width: 220px; height: 220px; }
+  .slice-wrap canvas { width: 170px; height: 170px; display: block; }
+  .axis-label { font-size: 9px; color: #888; text-align: center; margin-bottom: 4px; text-transform: uppercase; }
 </style>
 </head>
 <body>
 
 <div id="upload-panel">
-  <div style="font-weight: bold; margin-bottom: 10px; color: #2563eb;">3D СЕГМЕНТАЦИЯ ОПУХОЛИ</div>
+  <div style="font-weight: bold; margin-bottom: 10px; color: #2563eb; font-size: 14px;">АНАЛИЗ ОПУХОЛИ</div>
   <label>FLAIR <input type="file" id="flair"></label>
   <label>T1 <input type="file" id="t1"></label>
   <label>T1ce <input type="file" id="t1ce"></label>
   <label>T2 <input type="file" id="t2"></label>
+
   <button onclick="runPrediction()">НАЧАТЬ АНАЛИЗ</button>
 
   <div class="control-group">
-    <div style="font-size: 13px; font-weight: bold; margin-bottom: 8px;">Срезы модели</div>
     <label><input type="checkbox" id="clipEnabledX" checked> X Сагиттальный</label>
-    <input type="range" id="clipSliderX" min="-150" max="150" value="150" style="width:100%;">
-    <label><input type="checkbox" id="clipEnabledY"> Y Фронтальный</label>
-    <input type="range" id="clipSliderY" min="-150" max="150" value="150" style="width:100%;">
-    <label><input type="checkbox" id="clipEnabledZ"> Z Аксиальный</label>
-    <input type="range" id="clipSliderZ" min="-150" max="150" value="150" style="width:100%;">
+    <input type="range" id="clipSliderX" style="width:100%;">
+
+    <label style="margin-top:8px;"><input type="checkbox" id="clipEnabledY" checked> Y Фронтальный</label>
+    <input type="range" id="clipSliderY" style="width:100%;">
+
+    <label style="margin-top:8px;"><input type="checkbox" id="clipEnabledZ" checked> Z Аксиальный</label>
+    <input type="range" id="clipSliderZ" style="width:100%;">
   </div>
-  <div id="status">Выберите файлы...</div>
+
   <div class="control-group">
-    <div style="font-size: 13px; font-weight: bold; margin-bottom: 8px;">Масштаб модели</div>
-    <input type="range" id="scaleSlider" min="0.3" max="3.0" step="0.01" value="1.0" style="width:100%;">
-    <div style="font-size: 11px; color:#888; text-align:center; margin-top:4px;"><span id="scaleValue">1.00</span>&times;</div>
+    <label>Масштаб: <span id="scaleValue">1.00</span>&times;</label>
+    <input type="range" id="scaleSlider" min="0.5" max="2.5" step="0.01" value="1.0" style="width:100%;">
   </div>
+
+  <div id="status">Загрузите NIfTI файлы...</div>
 </div>
 
 <div id="slice-panel">
-  <div style="font-weight:bold; color:#2563eb;">СРЕЗЫ 3D-МОДЕЛИ</div>
-  <div class="slice-wrap"><canvas id="mesh3dX" width="220" height="220"></canvas></div>
-  <div class="slice-wrap"><canvas id="mesh3dY" width="220" height="220"></canvas></div>
-  <div class="slice-wrap"><canvas id="mesh3dZ" width="220" height="220"></canvas></div>
+  <div class="slice-title">Срезы (мм)</div>
+  <div class="slice-wrap"><canvas id="mesh3dX"></canvas></div>
+  <div class="axis-label">Сагиттальный (X)</div>
+  <div class="slice-wrap"><canvas id="mesh3dY"></canvas></div>
+  <div class="axis-label">Фронтальный (Y)</div>
+  <div class="slice-wrap"><canvas id="mesh3dZ"></canvas></div>
+  <div class="axis-label">Аксиальный (Z)</div>
 </div>
 
 <script type="importmap">
@@ -79,27 +99,38 @@ let brainGroup = null, modelSize = null;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xf4f6f8);
 
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10000);
-camera.position.set(300, 300, 300);
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 5000);
+camera.position.set(250, 250, 250);
 
-// Возвращаемся к стандартному рендереру (autoClear=true) для стабильности
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.localClippingEnabled = true;
 document.body.appendChild(renderer.domElement);
 
 const offRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-offRenderer.setSize(220, 220);
+offRenderer.setSize(400, 400);
 offRenderer.localClippingEnabled = true;
 
 const controls = new OrbitControls(camera, renderer.domElement);
-scene.add(new THREE.AmbientLight(0xffffff, 1.5));
-const dl = new THREE.DirectionalLight(0xffffff, 1.0); dl.position.set(1, 1, 1); scene.add(dl);
+controls.enableDamping = true;
 
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const light = new THREE.DirectionalLight(0xffffff, 0.8);
+light.position.set(1, 1, 1);
+scene.add(light);
+
+// Плоскости для основного вида (отсекают внешнюю часть)
 const clipPlanes = [
-  new THREE.Plane(new THREE.Vector3(-1, 0, 0), 150),
-  new THREE.Plane(new THREE.Vector3(0, -1, 0), 150),
-  new THREE.Plane(new THREE.Vector3(0, 0, -1), 150)
+  new THREE.Plane(new THREE.Vector3(1, 0, 0), 0),
+  new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
+  new THREE.Plane(new THREE.Vector3(0, 0, 1), 0)
+];
+
+// Плоскости для 2D-срезов (инвертированные, чтобы видеть внутренности)
+const slicePlanes = [
+  new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0),
+  new THREE.Plane(new THREE.Vector3(0, -1, 0), 0),
+  new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)
 ];
 
 function getActivePlanes() {
@@ -118,28 +149,31 @@ window.runPrediction = async function() {
     if(f) fd.append(id, f);
   });
 
-  status.innerText = "⏳ Анализ...";
+  if (fd.keys().next().done) {
+    status.innerHTML = "<span style='color:orange;'>⚠️ Выберите файлы</span>";
+    return;
+  }
+
+  status.innerHTML = "<span style='color:#2563eb;'>⏳ Анализ...</span>";
   try {
     const res = await fetch("http://localhost:8000/predict", { method: "POST", body: fd });
     const url = URL.createObjectURL(await res.blob());
 
     new GLTFLoader().load(url, (gltf) => {
-      scene.children = scene.children.filter(c => c.isLight || c.type !== 'Group');
-
+      if(brainGroup) scene.remove(brainGroup);
       const model = gltf.scene;
       let meshes = [];
       model.traverse(n => { if(n.isMesh) meshes.push(n); });
       meshes.sort((a,b) => b.geometry.attributes.position.count - a.geometry.attributes.position.count);
 
-      meshes.forEach((mesh, index) => {
-        const isBrain = index === 0;
+      meshes.forEach((mesh, i) => {
+        const isBrain = i === 0;
         mesh.material = new THREE.MeshStandardMaterial({
-          color: isBrain ? 0xd8dee8 : 0xd72638,
+          color: isBrain ? 0xcccccc : 0xa11d33,
           transparent: isBrain,
-          opacity: isBrain ? 0.2 : 1.0,
+          opacity: isBrain ? 0.15 : 1.0,
           clippingPlanes: getActivePlanes(),
-          side: THREE.DoubleSide, // Критично для заполнения среза
-          roughness: 0.5
+          side: THREE.DoubleSide
         });
       });
 
@@ -151,25 +185,82 @@ window.runPrediction = async function() {
       brainGroup.add(model);
       scene.add(brainGroup);
 
-      const hx = modelSize.x/2, hy = modelSize.y/2, hz = modelSize.z/2;
-      const axes = ['X', 'Y', 'Z'], lims = [hx, hy, hz];
+      const axes = ['X','Y','Z'];
+      const dims = [modelSize.x, modelSize.y, modelSize.z];
       axes.forEach((ax, i) => {
         const s = document.getElementById('clipSlider' + ax);
-        s.min = -lims[i]; s.max = lims[i]; s.value = lims[i];
-        clipPlanes[i].constant = lims[i];
+        const half = dims[i]/2;
+        s.min = -half; s.max = half; s.value = 0; // Начинаем с середины, где опухоль
+        clipPlanes[i].constant = 0;
+        slicePlanes[i].constant = 0;
       });
 
       document.getElementById('slice-panel').style.display = "flex";
-      status.innerText = "✅ Готово";
+      status.innerHTML = "✅ Готово. Размер: " + modelSize.x.toFixed(0) + "мм";
       axes.forEach(renderMesh3D);
     });
-  } catch (e) { status.innerText = "❌ Ошибка"; }
+  } catch (e) { status.innerHTML = "<span style='color:red;'>❌ Ошибка</span>"; }
 };
 
+function renderMesh3D(axis) {
+  if (!brainGroup || !modelSize) return;
+  const canvas = document.getElementById('mesh3d' + axis);
+  const ctx = canvas.getContext('2d');
+  const idx = axis === 'X' ? 0 : axis === 'Y' ? 1 : 2;
+  const val = parseFloat(document.getElementById('clipSlider' + axis).value);
+
+  // Спец-режим для 2D: делаем мозг плотнее, а опухоль ярче
+  const states = [];
+  scene.traverse(n => {
+    if (n.isMesh) {
+      states.push({ m: n, t: n.material.transparent, o: n.material.opacity, cp: n.material.clippingPlanes });
+      const isBrain = states.length === 1;
+      n.material.transparent = false;
+      n.material.opacity = 1.0;
+      // ВАЖНО: Используем инвертированную плоскость, чтобы смотреть "сквозь" оболочку
+      n.material.clippingPlanes = [slicePlanes[idx]];
+    }
+  });
+
+  const zoom = Math.max(modelSize.x, modelSize.y, modelSize.z) * 0.55;
+  const cam = new THREE.OrthographicCamera(-zoom, zoom, zoom, -zoom, 0.1, 1000);
+
+  // Камера стоит ЧУТЬ впереди плоскости разреза и смотрит вглубь
+  const offset = 0.5;
+  if (axis === 'X') { cam.position.set(val + offset, 0, 0); cam.lookAt(val - 100, 0, 0); }
+  else if (axis === 'Y') { cam.position.set(0, val + offset, 0); cam.lookAt(0, val - 100, 0); cam.up.set(0,0,1); }
+  else { cam.position.set(0, 0, val + offset); cam.lookAt(0, 0, val - 100); }
+
+  offRenderer.setClearColor(0x111111);
+  offRenderer.render(scene, cam);
+
+  states.forEach(s => {
+    s.m.material.transparent = s.t;
+    s.m.material.opacity = s.o;
+    s.m.material.clippingPlanes = s.cp;
+  });
+
+  ctx.drawImage(offRenderer.domElement, 0, 0, canvas.width, canvas.height);
+}
+
+['X','Y','Z'].forEach((ax, i) => {
+  document.getElementById('clipSlider' + ax).oninput = (e) => {
+    const val = parseFloat(e.target.value);
+    clipPlanes[i].constant = val;
+    slicePlanes[i].constant = -val; // Инвертируем для внутренней камеры
+    renderMesh3D(ax);
+  };
+  document.getElementById('clipEnabled' + ax).onchange = () => {
+    const p = getActivePlanes();
+    scene.traverse(n => { if(n.isMesh) n.material.clippingPlanes = p; });
+    renderMesh3D(ax);
+  };
+});
+
 document.getElementById('scaleSlider').oninput = (e) => {
-  const s = parseFloat(e.target.value);
-  document.getElementById('scaleValue').innerText = s.toFixed(2);
-  if (brainGroup) { brainGroup.scale.setScalar(s); ['X','Y','Z'].forEach(renderMesh3D); }
+  const v = parseFloat(e.target.value);
+  document.getElementById('scaleValue').innerText = v.toFixed(2);
+  if(brainGroup) brainGroup.scale.setScalar(v);
 };
 
 function animate() {
@@ -179,37 +270,11 @@ function animate() {
 }
 animate();
 
-function renderMesh3D(axis) {
-  if (!brainGroup || !modelSize) return;
-  const val = parseFloat(document.getElementById('clipSlider' + axis).value);
-  const s = Math.max(modelSize.x, modelSize.y, modelSize.z) / 1.5;
-
-  // Ключевой момент: near и far зажаты максимально плотно (эффект сплющивания)
-  // Это заставляет камеру видеть только поверхность среза
-  const cam = new THREE.OrthographicCamera(-s, s, s, -s, 0.01, 1.0);
-  const EPS = 0.05;
-
-  if (axis === 'X') { cam.position.set(val + EPS, 0, 0); cam.lookAt(val, 0, 0); }
-  else if (axis === 'Y') { cam.position.set(0, val + EPS, 0); cam.lookAt(0, val, 0); cam.up.set(0,0,1); }
-  else { cam.position.set(0, 0, val + EPS); cam.lookAt(0, 0, val); }
-
-  offRenderer.render(scene, cam);
-  const ctx = document.getElementById('mesh3d' + axis).getContext('2d');
-  ctx.clearRect(0, 0, 220, 220);
-  ctx.drawImage(offRenderer.domElement, 0, 0, 220, 220);
-}
-
-['X','Y','Z'].forEach((ax, i) => {
-  document.getElementById('clipSlider' + ax).oninput = (e) => {
-    clipPlanes[i].constant = Number(e.target.value);
-    renderMesh3D(ax);
-  };
-  document.getElementById('clipEnabled' + ax).onchange = () => {
-    scene.traverse(n => { if (n.isMesh && n.material) n.material.clippingPlanes = getActivePlanes(); });
-    renderMesh3D(ax);
-  };
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
 });
 </script>
 </body>
 </html>
-
