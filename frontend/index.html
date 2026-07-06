@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<title>BraTS 3D Viewer — MVP</title>
+<title>BraTS 3D Viewer — Solid Tumor</title>
 <style>
   body { margin: 0; background: #f4f6f8; color: #222; font-family: sans-serif; overflow: hidden; }
   #upload-panel {
@@ -18,38 +18,56 @@
   }
   #status { margin-top: 15px; font-size: 12px; color: #444; line-height: 1.4; }
   .control-group { margin-top: 15px; padding-top: 12px; border-top: 1px solid #d5dbe3; }
+  #slice-panel {
+    position: absolute; top: 15px; right: 15px; z-index: 100;
+    background: rgba(255,255,255,0.94); padding: 16px;
+    border-radius: 12px; border: 1px solid #d5dbe3;
+    width: 260px; box-shadow: 0 10px 30px rgba(0,0,0,0.12);
+    display: none; flex-direction: column; gap: 14px;
+  }
+  .slice-wrap {
+    position: relative; width: 220px; height: 220px;
+    background: #000; border-radius: 8px; overflow: hidden;
+  }
+  .slice-wrap canvas { width: 220px; height: 220px; }
 </style>
 </head>
 <body>
 
 <div id="upload-panel">
   <div style="font-weight: bold; margin-bottom: 10px; color: #2563eb;">3D СЕГМЕНТАЦИЯ ОПУХОЛИ</div>
-
-  <label>FLAIR <input type="file" id="flair" accept=".nii,.nii.gz"></label>
-  <label>T1 <input type="file" id="t1" accept=".nii,.nii.gz"></label>
-  <label>T1ce <input type="file" id="t1ce" accept=".nii,.nii.gz"></label>
-  <label>T2 <input type="file" id="t2" accept=".nii,.nii.gz"></label>
-
+  <label>FLAIR <input type="file" id="flair"></label>
+  <label>T1 <input type="file" id="t1"></label>
+  <label>T1ce <input type="file" id="t1ce"></label>
+  <label>T2 <input type="file" id="t2"></label>
   <button onclick="runPrediction()">НАЧАТЬ АНАЛИЗ</button>
 
   <div class="control-group">
-    <div style="font-size: 13px; font-weight: bold; margin-bottom: 8px;">Разрез модели</div>
-    <label style="display:block; font-size: 12px; margin-bottom: 8px;">
-      <input type="checkbox" id="clipEnabled"> Включить разрез
-    </label>
-    <input type="range" id="clipSlider" min="-150" max="150" value="150" style="width:100%;">
+    <div style="font-size: 13px; font-weight: bold; margin-bottom: 8px;">Срезы модели</div>
+    <label><input type="checkbox" id="clipEnabledX" checked> X Сагиттальный</label>
+    <input type="range" id="clipSliderX" min="-150" max="150" value="150" style="width:100%;">
+    <label><input type="checkbox" id="clipEnabledY"> Y Фронтальный</label>
+    <input type="range" id="clipSliderY" min="-150" max="150" value="150" style="width:100%;">
+    <label><input type="checkbox" id="clipEnabledZ"> Z Аксиальный</label>
+    <input type="range" id="clipSliderZ" min="-150" max="150" value="150" style="width:100%;">
   </div>
+  <div id="status">Выберите файлы...</div>
+  <div class="control-group">
+    <div style="font-size: 13px; font-weight: bold; margin-bottom: 8px;">Масштаб модели</div>
+    <input type="range" id="scaleSlider" min="0.3" max="3.0" step="0.01" value="1.0" style="width:100%;">
+    <div style="font-size: 11px; color:#888; text-align:center; margin-top:4px;"><span id="scaleValue">1.00</span>&times;</div>
+  </div>
+</div>
 
-  <div id="status">Выберите файлы пациента...</div>
+<div id="slice-panel">
+  <div style="font-weight:bold; color:#2563eb;">СРЕЗЫ 3D-МОДЕЛИ</div>
+  <div class="slice-wrap"><canvas id="mesh3dX" width="220" height="220"></canvas></div>
+  <div class="slice-wrap"><canvas id="mesh3dY" width="220" height="220"></canvas></div>
+  <div class="slice-wrap"><canvas id="mesh3dZ" width="220" height="220"></canvas></div>
 </div>
 
 <script type="importmap">
-{
-  "imports": {
-    "three": "https://unpkg.com/three@0.164.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.164.0/examples/jsm/"
-  }
-}
+{ "imports": { "three": "https://unpkg.com/three@0.164.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.164.0/examples/jsm/" } }
 </script>
 
 <script type="module">
@@ -57,27 +75,102 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
+let brainGroup = null, modelSize = null;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xf4f6f8);
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10000);
-camera.position.set(0, 0, 500);
+camera.position.set(300, 300, 300);
 
+// Возвращаемся к стандартному рендереру (autoClear=true) для стабильности
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.localClippingEnabled = true;
 document.body.appendChild(renderer.domElement);
 
+const offRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+offRenderer.setSize(220, 220);
+offRenderer.localClippingEnabled = true;
+
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
+scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+const dl = new THREE.DirectionalLight(0xffffff, 1.0); dl.position.set(1, 1, 1); scene.add(dl);
 
-const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
-scene.add(ambientLight);
-const dirLight = new THREE.DirectionalLight(0xffffff, 2);
-dirLight.position.set(10, 10, 10);
-scene.add(dirLight);
+const clipPlanes = [
+  new THREE.Plane(new THREE.Vector3(-1, 0, 0), 150),
+  new THREE.Plane(new THREE.Vector3(0, -1, 0), 150),
+  new THREE.Plane(new THREE.Vector3(0, 0, -1), 150)
+];
 
-const clipPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 150);
+function getActivePlanes() {
+  const p = [];
+  if (document.getElementById('clipEnabledX').checked) p.push(clipPlanes[0]);
+  if (document.getElementById('clipEnabledY').checked) p.push(clipPlanes[1]);
+  if (document.getElementById('clipEnabledZ').checked) p.push(clipPlanes[2]);
+  return p;
+}
+
+window.runPrediction = async function() {
+  const status = document.getElementById('status');
+  const fd = new FormData();
+  ['flair','t1','t1ce','t2'].forEach(id => {
+    const f = document.getElementById(id).files[0];
+    if(f) fd.append(id, f);
+  });
+
+  status.innerText = "⏳ Анализ...";
+  try {
+    const res = await fetch("http://localhost:8000/predict", { method: "POST", body: fd });
+    const url = URL.createObjectURL(await res.blob());
+
+    new GLTFLoader().load(url, (gltf) => {
+      scene.children = scene.children.filter(c => c.isLight || c.type !== 'Group');
+
+      const model = gltf.scene;
+      let meshes = [];
+      model.traverse(n => { if(n.isMesh) meshes.push(n); });
+      meshes.sort((a,b) => b.geometry.attributes.position.count - a.geometry.attributes.position.count);
+
+      meshes.forEach((mesh, index) => {
+        const isBrain = index === 0;
+        mesh.material = new THREE.MeshStandardMaterial({
+          color: isBrain ? 0xd8dee8 : 0xd72638,
+          transparent: isBrain,
+          opacity: isBrain ? 0.2 : 1.0,
+          clippingPlanes: getActivePlanes(),
+          side: THREE.DoubleSide, // Критично для заполнения среза
+          roughness: 0.5
+        });
+      });
+
+      const box = new THREE.Box3().setFromObject(model);
+      modelSize = box.getSize(new THREE.Vector3());
+      model.position.sub(box.getCenter(new THREE.Vector3()));
+
+      brainGroup = new THREE.Group();
+      brainGroup.add(model);
+      scene.add(brainGroup);
+
+      const hx = modelSize.x/2, hy = modelSize.y/2, hz = modelSize.z/2;
+      const axes = ['X', 'Y', 'Z'], lims = [hx, hy, hz];
+      axes.forEach((ax, i) => {
+        const s = document.getElementById('clipSlider' + ax);
+        s.min = -lims[i]; s.max = lims[i]; s.value = lims[i];
+        clipPlanes[i].constant = lims[i];
+      });
+
+      document.getElementById('slice-panel').style.display = "flex";
+      status.innerText = "✅ Готово";
+      axes.forEach(renderMesh3D);
+    });
+  } catch (e) { status.innerText = "❌ Ошибка"; }
+};
+
+document.getElementById('scaleSlider').oninput = (e) => {
+  const s = parseFloat(e.target.value);
+  document.getElementById('scaleValue').innerText = s.toFixed(2);
+  if (brainGroup) { brainGroup.scale.setScalar(s); ['X','Y','Z'].forEach(renderMesh3D); }
+};
 
 function animate() {
   requestAnimationFrame(animate);
@@ -86,84 +179,37 @@ function animate() {
 }
 animate();
 
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+function renderMesh3D(axis) {
+  if (!brainGroup || !modelSize) return;
+  const val = parseFloat(document.getElementById('clipSlider' + axis).value);
+  const s = Math.max(modelSize.x, modelSize.y, modelSize.z) / 1.5;
+
+  // Ключевой момент: near и far зажаты максимально плотно (эффект сплющивания)
+  // Это заставляет камеру видеть только поверхность среза
+  const cam = new THREE.OrthographicCamera(-s, s, s, -s, 0.01, 1.0);
+  const EPS = 0.05;
+
+  if (axis === 'X') { cam.position.set(val + EPS, 0, 0); cam.lookAt(val, 0, 0); }
+  else if (axis === 'Y') { cam.position.set(0, val + EPS, 0); cam.lookAt(0, val, 0); cam.up.set(0,0,1); }
+  else { cam.position.set(0, 0, val + EPS); cam.lookAt(0, 0, val); }
+
+  offRenderer.render(scene, cam);
+  const ctx = document.getElementById('mesh3d' + axis).getContext('2d');
+  ctx.clearRect(0, 0, 220, 220);
+  ctx.drawImage(offRenderer.domElement, 0, 0, 220, 220);
+}
+
+['X','Y','Z'].forEach((ax, i) => {
+  document.getElementById('clipSlider' + ax).oninput = (e) => {
+    clipPlanes[i].constant = Number(e.target.value);
+    renderMesh3D(ax);
+  };
+  document.getElementById('clipEnabled' + ax).onchange = () => {
+    scene.traverse(n => { if (n.isMesh && n.material) n.material.clippingPlanes = getActivePlanes(); });
+    renderMesh3D(ax);
+  };
 });
-
-document.getElementById('clipSlider').addEventListener('input', (e) => {
-  clipPlane.constant = Number(e.target.value);
-});
-
-document.getElementById('clipEnabled').addEventListener('change', (e) => {
-  const enabled = e.target.checked;
-  scene.traverse((child) => {
-    if (child.isMesh && child.material) {
-      child.material.clippingPlanes = enabled ? [clipPlane] : [];
-      child.material.needsUpdate = true;
-    }
-  });
-});
-
-window.runPrediction = async function () {
-  const status = document.getElementById('status');
-  const formData = new FormData();
-  const ids = ['flair', 't1', 't1ce', 't2'];
-
-  for (const id of ids) {
-    const file = document.getElementById(id).files[0];
-    if (!file) { status.innerHTML = "<span style='color: #d97706;'>⚠️ Выберите все файлы</span>"; return; }
-    formData.append(id, file);
-  }
-
-  status.innerHTML = "<span style='color: #2563eb;'>⏳ Обработка на сервере...</span>";
-
-  try {
-    const response = await fetch("http://localhost:8000/predict", { method: "POST", body: formData });
-    if (!response.ok) throw new Error("Ошибка сервера: " + response.status);
-
-    const url = URL.createObjectURL(await response.blob());
-    new GLTFLoader().load(url, (gltf) => {
-      // Удаляем старые модели (все объекты типа Group)
-      scene.children = scene.children.filter(c => c.isLight || c.type !== 'Group');
-
-      const model = gltf.scene;
-      let meshes = [];
-      model.traverse(n => { if (n.isMesh) meshes.push(n); });
-      meshes.sort((a, b) => b.geometry.attributes.position.count - a.geometry.attributes.position.count);
-
-      meshes.forEach((mesh, index) => {
-        const isBrain = index === 0;
-        mesh.material = new THREE.MeshStandardMaterial({
-          color: isBrain ? 0xd8dee8 : 0xd72638,
-          opacity: isBrain ? 0.22 : 1.0,
-          transparent: isBrain,
-          roughness: 0.5,
-          metalness: 0.2,
-          side: THREE.DoubleSide,
-          clippingPlanes: document.getElementById('clipEnabled').checked ? [clipPlane] : [],
-          emissive: isBrain ? 0x000000 : 0x330000
-        });
-      });
-
-      scene.add(model);
-      const box = new THREE.Box3().setFromObject(model);
-      const center = box.getCenter(new THREE.Vector3());
-      const size = box.getSize(new THREE.Vector3());
-      model.position.sub(center);
-
-      const maxDim = Math.max(size.x, size.y, size.z);
-      camera.position.set(maxDim, maxDim, maxDim);
-      controls.target.set(0, 0, 0);
-      controls.update();
-
-      status.innerHTML = "<span style='color: #16a34a;'>✅ Анализ завершен!</span>";
-    });
-  } catch (err) {
-    status.innerHTML = `<span style='color: #dc2626;'>❌ ${err.message}</span>`;
-  }
-};
 </script>
 </body>
 </html>
+
