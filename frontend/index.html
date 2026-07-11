@@ -44,6 +44,26 @@
   }
   .slice-wrap canvas { width: 170px; height: 170px; display: block; }
   .axis-label { font-size: 9px; color: #888; text-align: center; margin-bottom: 4px; text-transform: uppercase; }
+
+  .class-legend {
+    margin-top: 10px;
+    padding: 8px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    font-size: 10px;
+  }
+  .class-item {
+    display: flex;
+    align-items: center;
+    margin: 4px 0;
+  }
+  .class-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    margin-right: 8px;
+    border: 1px solid #999;
+  }
 </style>
 </head>
 <body>
@@ -56,6 +76,13 @@
   <label>T2 <input type="file" id="t2"></label>
 
   <button onclick="runPrediction()">НАЧАТЬ АНАЛИЗ</button>
+
+  <div class="class-legend">
+    <div class="class-item"><div class="class-color" style="background: #c8c8c8;"></div>Мозг</div>
+    <div class="class-item"><div class="class-color" style="background: #64b4ff;"></div>Отёк (класс 2)</div>
+    <div class="class-item"><div class="class-color" style="background: #ffa500;"></div>Некроз (класс 1)</div>
+    <div class="class-item"><div class="class-color" style="background: #ff1e1e;"></div>Активная опухоль (класс 3)</div>
+  </div>
 
   <div class="control-group">
     <label><input type="checkbox" id="clipEnabledX" checked> X Сагиттальный</label>
@@ -87,7 +114,12 @@
 </div>
 
 <script type="importmap">
-{ "imports": { "three": "https://unpkg.com/three@0.164.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.164.0/examples/jsm/" } }
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.164.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.0/examples/jsm/"
+  }
+}
 </script>
 
 <script type="module">
@@ -105,6 +137,7 @@ camera.position.set(250, 250, 250);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.localClippingEnabled = true;
+renderer.sortObjects = true;
 document.body.appendChild(renderer.domElement);
 
 const offRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -119,14 +152,12 @@ const light = new THREE.DirectionalLight(0xffffff, 0.8);
 light.position.set(1, 1, 1);
 scene.add(light);
 
-// Плоскости для основного вида (отсекают внешнюю часть)
 const clipPlanes = [
   new THREE.Plane(new THREE.Vector3(1, 0, 0), 0),
   new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
   new THREE.Plane(new THREE.Vector3(0, 0, 1), 0)
 ];
 
-// Плоскости для 2D-срезов (инвертированные, чтобы видеть внутренности)
 const slicePlanes = [
   new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0),
   new THREE.Plane(new THREE.Vector3(0, -1, 0), 0),
@@ -140,6 +171,15 @@ function getActivePlanes() {
   if (document.getElementById('clipEnabledZ').checked) p.push(clipPlanes[2]);
   return p;
 }
+
+// Цветовая схема для разных типов мешей
+// renderOrder гарантирует правильный порядок отрисовки прозрачных объектов
+const MESH_CONFIG = {
+  'brain':     { color: 0xc8c8c8, transparent: true,  opacity: 0.25, depthWrite: false, renderOrder: 0 },
+  'edema':     { color: 0x64b4ff, transparent: true,  opacity: 0.5,  depthWrite: false, renderOrder: 1 },
+  'necrosis':  { color: 0xffa500, transparent: true,  opacity: 0.8,  depthWrite: false, renderOrder: 2 },
+  'enhancing': { color: 0xff1e1e, transparent: false, opacity: 1.0,  depthWrite: true,  renderOrder: 3 }
+};
 
 window.runPrediction = async function() {
   const status = document.getElementById('status');
@@ -164,16 +204,28 @@ window.runPrediction = async function() {
       const model = gltf.scene;
       let meshes = [];
       model.traverse(n => { if(n.isMesh) meshes.push(n); });
-      meshes.sort((a,b) => b.geometry.attributes.position.count - a.geometry.attributes.position.count);
 
-      meshes.forEach((mesh, i) => {
-        const isBrain = i === 0;
+      console.log(`Загружено ${meshes.length} мешей`);
+
+      // Применяем материалы на основе имени узла из GLB
+      meshes.forEach((mesh) => {
+        const meshName = (mesh.name || '').toLowerCase();
+        console.log(`Меш: имя="${meshName}", вершин=${mesh.geometry.attributes.position.count}`);
+
+        const config = MESH_CONFIG[meshName] || {
+          color: 0x888888, transparent: true, opacity: 0.5,
+          depthWrite: false, renderOrder: 99
+        };
+
         mesh.material = new THREE.MeshStandardMaterial({
-          color: isBrain ? 0xcccccc : 0xa11d33,
-          transparent: isBrain,
-          opacity: isBrain ? 0.15 : 1.0,
-          clippingPlanes: getActivePlanes(),
-          side: THREE.DoubleSide
+          color: config.color,
+          transparent: config.transparent,
+          opacity: config.opacity,
+          depthWrite: config.depthWrite,
+          depthTest: true,
+          renderOrder: config.renderOrder,
+          side: THREE.DoubleSide,
+          clippingPlanes: getActivePlanes()
         });
       });
 
@@ -190,16 +242,20 @@ window.runPrediction = async function() {
       axes.forEach((ax, i) => {
         const s = document.getElementById('clipSlider' + ax);
         const half = dims[i]/2;
-        s.min = -half; s.max = half; s.value = 0; // Начинаем с середины, где опухоль
+        s.min = -half; s.max = half; s.value = 0;
         clipPlanes[i].constant = 0;
         slicePlanes[i].constant = 0;
       });
 
       document.getElementById('slice-panel').style.display = "flex";
-      status.innerHTML = "✅ Готово. Размер: " + modelSize.x.toFixed(0) + "мм";
+      status.innerHTML = "✅ Готово. Размер: " + modelSize.x.toFixed(0) + "мм<br>" +
+                        "<small>Мешей: " + meshes.length + "</small>";
       axes.forEach(renderMesh3D);
     });
-  } catch (e) { status.innerHTML = "<span style='color:red;'>❌ Ошибка</span>"; }
+  } catch (e) {
+    status.innerHTML = "<span style='color:red;'>❌ Ошибка: " + e.message + "</span>";
+    console.error(e);
+  }
 };
 
 function renderMesh3D(axis) {
@@ -209,15 +265,12 @@ function renderMesh3D(axis) {
   const idx = axis === 'X' ? 0 : axis === 'Y' ? 1 : 2;
   const val = parseFloat(document.getElementById('clipSlider' + axis).value);
 
-  // Спец-режим для 2D: делаем мозг плотнее, а опухоль ярче
   const states = [];
   scene.traverse(n => {
     if (n.isMesh) {
       states.push({ m: n, t: n.material.transparent, o: n.material.opacity, cp: n.material.clippingPlanes });
-      const isBrain = states.length === 1;
       n.material.transparent = false;
       n.material.opacity = 1.0;
-      // ВАЖНО: Используем инвертированную плоскость, чтобы смотреть "сквозь" оболочку
       n.material.clippingPlanes = [slicePlanes[idx]];
     }
   });
@@ -225,7 +278,6 @@ function renderMesh3D(axis) {
   const zoom = Math.max(modelSize.x, modelSize.y, modelSize.z) * 0.55;
   const cam = new THREE.OrthographicCamera(-zoom, zoom, zoom, -zoom, 0.1, 1000);
 
-  // Камера стоит ЧУТЬ впереди плоскости разреза и смотрит вглубь
   const offset = 0.5;
   if (axis === 'X') { cam.position.set(val + offset, 0, 0); cam.lookAt(val - 100, 0, 0); }
   else if (axis === 'Y') { cam.position.set(0, val + offset, 0); cam.lookAt(0, val - 100, 0); cam.up.set(0,0,1); }
@@ -247,7 +299,7 @@ function renderMesh3D(axis) {
   document.getElementById('clipSlider' + ax).oninput = (e) => {
     const val = parseFloat(e.target.value);
     clipPlanes[i].constant = val;
-    slicePlanes[i].constant = -val; // Инвертируем для внутренней камеры
+    slicePlanes[i].constant = -val;
     renderMesh3D(ax);
   };
   document.getElementById('clipEnabled' + ax).onchange = () => {

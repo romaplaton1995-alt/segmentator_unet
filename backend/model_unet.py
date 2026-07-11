@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class DoubleConv3d(nn.Module):
     def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
@@ -51,20 +52,27 @@ class Up3d(nn.Module):
 
 
 class UNet3D(nn.Module):
-    def __init__(self, in_channels=4, out_channels=1, base_features=16):
+    def __init__(self, in_channels=4, out_channels=4, base_features=16):
         super().__init__()
+        # Encoder
         self.inc = DoubleConv3d(in_channels, base_features)
         self.down1 = Down3d(base_features, base_features * 2)
         self.down2 = Down3d(base_features * 2, base_features * 4)
         self.down3 = Down3d(base_features * 4, base_features * 8)
         self.down4 = Down3d(base_features * 8, base_features * 16)
+
+        # Bottleneck
         self.bottleneck = DoubleConv3d(base_features * 16, base_features * 32)
+
+        # Decoder — симметричный энкодеру + финальный up
         self.up1 = Up3d(base_features * 32, base_features * 16)
         self.up2 = Up3d(base_features * 16, base_features * 8)
         self.up3 = Up3d(base_features * 8, base_features * 4)
         self.up4 = Up3d(base_features * 4, base_features * 2)
-        self.up_final = Up3d(base_features * 2, base_features)
-        self.outc = nn.Conv3d(base_features, out_channels, kernel_size=1)
+        self.up_final = Up3d(base_features * 2, base_features)  # ← ДОБАВЛЕНО
+
+        # Финальный слой — принимает base_features (16) каналов
+        self.outc = nn.Conv3d(base_features, out_channels, kernel_size=1)  # ← ИСПРАВЛЕНО
 
     def forward(self, x):
         x1 = self.inc(x)
@@ -73,9 +81,10 @@ class UNet3D(nn.Module):
         x4 = self.down3(x3)
         x5 = self.down4(x4)
         x6 = self.bottleneck(x5)
+
         x = self.up1(x6, x5)
         x = self.up2(x, x4)
         x = self.up3(x, x3)
         x = self.up4(x, x2)
-        x = self.up_final(x, x1)
+        x = self.up_final(x, x1)  # ← ДОБАВЛЕНО
         return self.outc(x)
