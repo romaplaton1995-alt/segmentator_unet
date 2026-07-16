@@ -1,151 +1,472 @@
-import numpy as np
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any
+
 import nibabel as nib
+import numpy as np
 import torch
 import torch.nn.functional as F
-import os
-import logging
+
 from model_unet import UNet3D
+
 
 logger = logging.getLogger("main")
 
-MODEL_PATH = "/app/weights/best_model.pt"  # БЫЛО: best_model.pth
-PATCH_SIZE = (64, 128, 128)
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-_model = None
+MODEL_PATH = Path("/app/weights/best_model.pt")
+PATCH_SIZE = (96, 96, 96)
+OVERLAP = 0.5
+NUM_CLASSES = 4
+
+MODALITIES = ("t1", "t1ce", "t2", "flair")
+
+DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
+
+# ИСПРАВЛЕНО: инициализируем None, а не пустой моделью
+_model: UNet3D | None = None
 
 
-def get_model():
+def _extract_state_dict(
+    checkpoint: Any,
+) -> dict[str, torch.Tensor]:
+    if (
+        isinstance(checkpoint, dict)
+        and "model_state" in checkpoint
+    ):
+        state_dict = checkpoint["model_state"]
+    else:
+        state_dict = checkpoint
+
+    if not isinstance(state_dict, dict):
+        raise TypeError(
+            "Checkpoint не содержит state_dict."
+        )
+
+    return state_dict
+
+
+def get_model() -> UNet3D:
     global _model
-    if _model is None:
-        logger.info(f"Инициализация модели UNet3D на {DEVICE}")
-        _model = UNet3D(in_channels=4, out_channels=4, base_features=16)
 
-        # Загружаем чекпоинт
-        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
+    if _model is not None:
+        return _model
 
-        # Поддержка двух форматов:
-        # 1. Чекпоинт от train.py (с ключом 'model_state')
-        # 2. Обычный state_dict (если файл сохранён напрямую)
-        if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
-            logger.info("Загружен чекпоинт с метаданными (epoch, optimizer и т.д.)")
-            _model.load_state_dict(checkpoint['model_state'])
-        else:
-            logger.info("Загружен обычный state_dict")
-            _model.load_state_dict(checkpoint)
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Файл весов не найден: {MODEL_PATH}"
+        )
 
-        _model.to(DEVICE)
-        _model.eval()
-        logger.info("Модель успешно загружена и переведена в режим eval()")
+    logger.info(
+        "Загрузка UNet3D: "
+        f"device={DEVICE}, "
+        f"weights={MODEL_PATH}"
+    )
+
+    model = UNet3D(
+        in_channels=4,
+        out_channels=NUM_CLASSES,
+        base_features=8,
+    )
+
+    checkpoint = torch.load(
+        MODEL_PATH,
+        map_location="cpu",
+    )
+
+    state_dict = _extract_state_dict(checkpoint)
+
+    try:
+        model.load_state_dict(
+            state_dict,
+            strict=True,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Весы несовместимы с inference-моделью. "
+            "Проверьте base_features=8, "
+            "in_channels=4 и out_channels=4."
+        ) from exc
+
+    model.to(DEVICE)
+    model.eval()
+
+    _model = model
+
+    logger.info("Модель успешно загружена.")
+
     return _model
 
 
-def load_nifti(file_path: str) -> np.ndarray:
-    """
-    Загружает .nii/.nii.gz и приводит к порядку осей (D, H, W),
-    так как nibabel по умолчанию возвращает (H, W, D).
-    """
-    if not file_path.lower().endswith(('.nii', '.nii.gz')):
+def load_nifti(
+    file_path: str,
+) -> tuple[np.ndarray, np.ndarray, tuple[float, ...]]:
+    path = Path(file_path)
+
+    if not path.name.lower().endswith(
+        (".nii", ".nii.gz")
+    ):
         raise ValueError(
-            f"Ожидался файл формата NIfTI (.nii/.nii.gz), получен: {file_path}. "
-            f"Сконвертируйте DICOM в NIfTI заранее (например, через dcm2niix или CaPTk)."
+            f"Ожидался NIfTI-файл: {file_path}"
         )
-    data = nib.load(file_path).get_fdata(dtype=np.float32)
-    return np.transpose(data, (2, 0, 1))  # (H, W, D) -> (D, H, W)
+
+    image = nib.load(str(path))
+
+    data = image.get_fdata(
+        dtype=np.float32
+    )
+
+    if data.ndim != 3:
+        raise ValueError(
+            f"NIfTI должен быть 3D: {file_path}, "
+            f"shape={data.shape}"
+        )
+
+    affine = image.affine.copy()
+    spacing = tuple(
+        float(value)
+        for value in image.header.get_zooms()[:3]
+    )
+
+    # Приводим к соглашению [D, H, W].
+    data_dhw = np.transpose(
+        data,
+        (2, 0, 1),
+    )
+
+    return data_dhw, affine, spacing
 
 
-def load_and_normalize(file_paths: dict, session_dir: str):
-    """
-    file_paths: {'flair': path, 't1': path, 't1ce': path, 't2': path}
-    Все пути должны указывать на .nii/.nii.gz файлы одинакового разрешения.
-    """
-    imgs = []
-    affine = np.eye(4)
-    for m in ['flair', 't1', 't1ce', 't2']:
-        path = file_paths[m]
-        vol = load_nifti(path)
-        if m == 'flair':
-            # Сохраняем оригинальную аффинную матрицу FLAIR как референс геометрии
-            affine = nib.load(path).affine
-        imgs.append(vol)
-        logger.info(f"{m}: загружен, shape(D,H,W)={vol.shape}")
+def validate_modalities(
+    volumes: dict[str, np.ndarray],
+    spacings: dict[str, tuple[float, ...]],
+) -> None:
+    shapes = {
+        name: tuple(volume.shape)
+        for name, volume in volumes.items()
+    }
 
-        # Проверка согласованности форм перед стекингом
-        shapes = {m: img.shape for m, img in zip(['flair', 't1', 't1ce', 't2'], imgs)}
-        first_shape = imgs[0].shape
-        for m, s in shapes.items():
-            if s != first_shape:
-                raise ValueError(
-                    f"Несовпадение форм модальностей: {shapes}. "
-                    f"Все NIfTI-файлы должны быть приведены к единой сетке "
-                    f"(co-registration) до загрузки в приложение."
-                )
+    if len(set(shapes.values())) != 1:
+        raise ValueError(
+            "Размеры модальностей не совпадают: "
+            f"{shapes}"
+        )
 
-    image = np.stack(imgs, axis=0)  # (C, D, H, W)
-    image_torch = torch.from_numpy(image.copy()).float()
+    reference_spacing = spacings[MODALITIES[0]]
 
-    # Z-score нормализация по каждому каналу, без учета фона
-    for c in range(4):
-        ch = image_torch[c]
-        mask = ch > 0
-        if mask.any():
-            image_torch[c][mask] = (ch[mask] - ch[mask].mean()) / (ch[mask].std() + 1e-8)
-
-    flair_raw = image[0]
-    return image_torch, affine, flair_raw
+    for name, spacing in spacings.items():
+        if not np.allclose(
+            spacing,
+            reference_spacing,
+            atol=1e-3,
+        ):
+            raise ValueError(
+                "Spacing модальностей не совпадает: "
+                f"{spacings}"
+            )
 
 
-@torch.no_grad()
-def sliding_window_inference(model, image, patch_size=PATCH_SIZE, overlap=0.5):
-    c, d, h, w = image.shape
+def zscore_nonzero(
+    volume: np.ndarray,
+) -> np.ndarray:
+    result = volume.astype(
+        np.float32,
+        copy=True,
+    )
+
+    mask = result != 0
+
+    if not np.any(mask):
+        return result
+
+    values = result[mask]
+    mean = float(values.mean())
+    std = float(values.std())
+
+    if std < 1e-8:
+        result[mask] = 0.0
+    else:
+        result[mask] = (
+            result[mask] - mean
+        ) / std
+
+    return result
+
+
+def load_and_normalize(
+    file_paths: dict[str, str],
+) -> tuple[
+    torch.Tensor,
+    np.ndarray,
+    np.ndarray,
+    tuple[float, ...],
+]:
+    volumes: dict[str, np.ndarray] = {}
+    spacings: dict[str, tuple[float, ...]] = {}
+    affine = np.eye(4, dtype=np.float64)
+
+    for index, modality in enumerate(MODALITIES):
+        if modality not in file_paths:
+            raise ValueError(
+                f"Отсутствует модальность: {modality}"
+            )
+
+        volume, current_affine, spacing = load_nifti(
+            file_paths[modality]
+        )
+
+        if index == 0:
+            affine = current_affine
+
+        volumes[modality] = volume
+        spacings[modality] = spacing
+
+    validate_modalities(
+        volumes=volumes,
+        spacings=spacings,
+    )
+
+    normalized = []
+
+    for modality in MODALITIES:
+        normalized.append(
+            zscore_nonzero(volumes[modality])
+        )
+
+    image = np.stack(
+        normalized,
+        axis=0,
+    ).astype(np.float32)
+
+    flair_raw = volumes["flair"].astype(
+        np.float32,
+        copy=True,
+    )
+
+    image_tensor = torch.from_numpy(
+        image
+    ).float()
+
+    return (
+        image_tensor,
+        affine,
+        flair_raw,
+        spacings["flair"],
+    )
+
+
+def _steps(
+    size: int,
+    patch: int,
+    stride: int,
+) -> list[int]:
+    if size <= patch:
+        return [0]
+
+    values = list(
+        range(
+            0,
+            size - patch + 1,
+            stride,
+        )
+    )
+
+    last = size - patch
+
+    if values[-1] != last:
+        values.append(last)
+
+    return sorted(set(values))
+
+
+def _pad_image(
+    image: torch.Tensor,
+    patch_size: tuple[int, int, int],
+) -> tuple[
+    torch.Tensor,
+    tuple[int, int, int],
+]:
+    _, depth, height, width = image.shape
     pd, ph, pw = patch_size
-    stride = [max(1, int(p * (1 - overlap))) for p in patch_size]
-    pad_d, pad_h, pad_w = max(0, pd - d), max(0, ph - h), max(0, pw - w)
 
-    image = F.pad(image, (0, pad_w, 0, pad_h, 0, pad_d))
+    pad_d = max(pd - depth, 0)
+    pad_h = max(ph - height, 0)
+    pad_w = max(pw - width, 0)
 
-    _, d, h, w = image.shape
-    # ИЗМЕНЕНО: 4 канала вместо 1 для многоклассовой сегментации
-    prob_map = torch.zeros((4, d, h, w), device=DEVICE)
-    count_map = torch.zeros((4, d, h, w), device=DEVICE)
+    padded = F.pad(
+        image,
+        (
+            0,
+            pad_w,
+            0,
+            pad_h,
+            0,
+            pad_d,
+        ),
+    )
 
-    z_steps = sorted(set(list(range(0, max(d - pd, 1), stride[0])) + [d - pd]))
-    y_steps = sorted(set(list(range(0, max(h - ph, 1), stride[1])) + [h - ph]))
-    x_steps = sorted(set(list(range(0, max(w - pw, 1), stride[2])) + [w - pw]))
+    return padded, (pad_d, pad_h, pad_w)
+
+
+@torch.inference_mode()
+def sliding_window_inference(
+    model: UNet3D,
+    image: torch.Tensor,
+    patch_size: tuple[int, int, int] = PATCH_SIZE,
+    overlap: float = OVERLAP,
+) -> torch.Tensor:
+    if image.ndim != 4:
+        raise ValueError(
+            "Ожидалась форма image [C,D,H,W]."
+        )
+
+    if not 0.0 <= overlap < 1.0:
+        raise ValueError(
+            "overlap должен быть в диапазоне [0, 1)."
+        )
+
+    padded, padding = _pad_image(
+        image,
+        patch_size,
+    )
+
+    _, depth, height, width = padded.shape
+    pd, ph, pw = patch_size
+
+    strides = tuple(
+        max(
+            1,
+            int(
+                patch * (1.0 - overlap)
+            ),
+        )
+        for patch in patch_size
+    )
+
+    z_steps = _steps(
+        depth,
+        pd,
+        strides[0],
+    )
+    y_steps = _steps(
+        height,
+        ph,
+        strides[1],
+    )
+    x_steps = _steps(
+        width,
+        pw,
+        strides[2],
+    )
+
+    probability_map = torch.zeros(
+        (
+            NUM_CLASSES,
+            depth,
+            height,
+            width,
+        ),
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+
+    count_map = torch.zeros(
+        (
+            1,
+            depth,
+            height,
+            width,
+        ),
+        dtype=torch.float32,
+        device=DEVICE,
+    )
 
     for z in z_steps:
         for y in y_steps:
             for x in x_steps:
-                patch = image[:, z:z + pd, y:y + ph, x:x + pw].unsqueeze(0).to(DEVICE)
-                with torch.amp.autocast('cuda', enabled=(DEVICE.type == 'cuda')):
-                    logits = model(patch)
-                    # ИЗМЕНЕНО: softmax вместо sigmoid для многоклассовой сегментации
-                    probs = F.softmax(logits, dim=1)[0]
-                    prob_map[:, z:z + pd, y:y + ph, x:x + pw] += probs
-                    count_map[:, z:z + pd, y:y + ph, x:x + pw] += 1
+                patch = padded[
+                    :,
+                    z:z + pd,
+                    y:y + ph,
+                    x:x + pw,
+                ].unsqueeze(0).to(DEVICE)
 
-    prob_map = prob_map / count_map
+                # ИСПРАВЛЕНО: убрали autocast для избежания конфликта float16/float32
+                # Явно приводим к float32 для стабильности
+                patch = patch.float()
+                logits = model(patch)
+                probabilities = torch.softmax(
+                    logits,
+                    dim=1,
+                )[0].float()
 
-    return prob_map[:, :d - pad_d if pad_d else d,
-           :h - pad_h if pad_h else h,
-           :w - pad_w if pad_w else w]
+                probability_map[
+                    :,
+                    z:z + pd,
+                    y:y + ph,
+                    x:x + pw,
+                ] += probabilities
+
+                count_map[
+                    :,
+                    z:z + pd,
+                    y:y + ph,
+                    x:x + pw,
+                ] += 1.0
+
+    probability_map = probability_map / count_map.clamp_min(
+        1.0
+    )
+
+    pad_d, pad_h, pad_w = padding
+
+    end_d = depth - pad_d if pad_d else depth
+    end_h = height - pad_h if pad_h else height
+    end_w = width - pad_w if pad_w else width
+
+    return probability_map[
+        :,
+        :end_d,
+        :end_h,
+        :end_w,
+    ]
 
 
-def run_inference(file_paths: dict, session_dir: str):
-    """
-    Выполняет инференс и возвращает многоклассовую маску.
-
-    Returns:
-        mask: np.array с значениями 0, 1, 2, 3
-        affine: аффинная матрица
-        flair_raw: исходный FLAIR volume
-    """
+def run_inference(
+    file_paths: dict[str, str],
+    session_dir: str | None = None,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    tuple[float, ...],
+]:
     model = get_model()
-    image, affine, flair_raw = load_and_normalize(file_paths, session_dir)
-    prob_map = sliding_window_inference(model, image)
 
-    # ИЗМЕНЕНО: используем argmax вместо порога для получения класса
-    mask = prob_map.argmax(dim=0).cpu().numpy().astype(np.uint8)
+    image, affine, flair_raw, spacing = (
+        load_and_normalize(file_paths)
+    )
 
-    logger.info(f"Инференс завершён: mask shape={mask.shape}, unique classes={np.unique(mask)}")
+    probabilities = sliding_window_inference(
+        model=model,
+        image=image,
+    )
 
-    return mask, affine, flair_raw
+    mask = probabilities.argmax(
+        dim=0
+    ).cpu().numpy().astype(np.uint8)
+
+    logger.info(
+        "Инференс завершён: "
+        f"shape={mask.shape}, "
+        f"classes={np.unique(mask).tolist()}"
+    )
+
+    return (
+        mask,
+        affine,
+        flair_raw,
+        spacing,
+    )

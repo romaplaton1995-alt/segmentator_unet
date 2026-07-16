@@ -1,292 +1,438 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
+from __future__ import annotations
 
+import json
+import logging
 import os
-import uuid
 import shutil
 import traceback
-import logging
+import uuid
+from pathlib import Path
 
-from inference import run_inference, get_model
+import nibabel as nib
+import numpy as np
+from fastapi import (
+    FastAPI,
+    File,
+    HTTPException,
+    UploadFile,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+
+from inference import (
+    MODALITIES,
+    get_model,
+    load_nifti,
+    run_inference,
+)
 from mesh_utils import build_glb
 
 
-# ============================================================
-# ЛОГИРОВАНИЕ
-# ============================================================
+logging.basicConfig(
+    level=logging.INFO,
+)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("main")
 
-
-# ============================================================
-# FASTAPI APP
-# ============================================================
-
-app = FastAPI(title="BraTS Tumor Segmentation API")
-
+app = FastAPI(
+    title="BraTS Tumor Segmentation API",
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
     expose_headers=["X-Session-Id"],
 )
 
+TEMP_DIR = Path("/app/temp")
+OUTPUT_DIR = Path("/app/output")
 
-# ============================================================
-# ПАПКИ ДЛЯ ВРЕМЕННЫХ И ВЫХОДНЫХ ФАЙЛОВ
-# ============================================================
+TEMP_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+OUTPUT_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
 
-TEMP_DIR = "/app/temp"
-OUTPUT_DIR = "/app/output"
 
-os.makedirs(TEMP_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+def save_upload_file(
+    upload: UploadFile,
+    path: Path,
+) -> None:
+    with path.open("wb") as output:
+        shutil.copyfileobj(
+            upload.file,
+            output,
+        )
 
 
-# ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================
-
-def get_upload_extension(filename: str) -> str:
-    """
-    Определяет расширение загруженного файла.
-
-    Поддерживаем:
-    - .zip для DICOM-серий
-    - .nii для NIfTI
-    - .nii.gz для сжатого NIfTI
-
-    Если расширение неизвестно, по умолчанию считаем файл NIfTI.
-    """
-    if filename is None:
-        return ".nii"
-
-    filename = filename.lower()
-
-    if filename.endswith(".zip"):
-        return ".zip"
-
-    if filename.endswith(".nii.gz"):
+def extension_for_upload(
+    filename: str | None,
+) -> str:
+    if not filename:
         return ".nii.gz"
 
-    if filename.endswith(".nii"):
+    name = filename.lower()
+
+    if name.endswith(".nii.gz"):
+        return ".nii.gz"
+
+    if name.endswith(".nii"):
         return ".nii"
 
-    return ".nii"
+    raise ValueError(
+        "Поддерживаются только .nii и .nii.gz."
+    )
 
 
-def save_upload_file(upload: UploadFile, path: str):
-    """
-    Сохраняет UploadFile на диск.
-    """
-    with open(path, "wb") as f:
-        shutil.copyfileobj(upload.file, f)
+def metadata_path(
+    session_id: str,
+) -> Path:
+    return OUTPUT_DIR / f"{session_id}.json"
 
 
-# ============================================================
-# STARTUP
-# ============================================================
+def volume_path(
+    session_id: str,
+) -> Path:
+    return OUTPUT_DIR / f"{session_id}_flair.npy"
+
+
+def glb_path(
+    session_id: str,
+) -> Path:
+    return OUTPUT_DIR / f"{session_id}.glb"
+
+
+def calculate_class_voxels(
+    mask: np.ndarray,
+) -> dict[str, int]:
+    return {
+        "background": int(
+            np.sum(mask == 0)
+        ),
+        "necrosis": int(
+            np.sum(mask == 1)
+        ),
+        "edema": int(
+            np.sum(mask == 2)
+        ),
+        "enhancing": int(
+            np.sum(mask == 3)
+        ),
+        "whole_tumor": int(
+            np.sum(mask > 0)
+        ),
+        "tumor_core": int(
+            np.sum(np.isin(mask, [1, 3]))
+        ),
+    }
+
 
 @app.on_event("startup")
-def load_model_on_startup():
-    """
-    Загружаем модель при старте контейнера, чтобы первый запрос
-    не тратил время на инициализацию весов.
-    """
-    logger.info("Загрузка модели при старте backend...")
+def startup() -> None:
+    logger.info(
+        "Загрузка модели при запуске backend."
+    )
     get_model()
-    logger.info("Модель успешно загружена.")
+    logger.info(
+        "Backend готов."
+    )
 
-
-# ============================================================
-# ROUTES
-# ============================================================
 
 @app.get("/")
-def root():
-    """
-    Корневой endpoint.
-    Нужен, чтобы при переходе на http://localhost:8000/
-    backend не возвращал 404.
-    """
+def root() -> dict:
     return {
         "service": "BraTS Tumor Segmentation API",
         "status": "running",
         "endpoints": {
             "health": "/health",
             "predict": "/predict",
-            "docs": "/docs"
-        }
+            "docs": "/docs",
+        },
     }
 
 
 @app.get("/health")
-def health_check():
-    """
-    Проверка работоспособности backend.
-    """
-    return {"status": "ok"}
-
-
-@app.get("/volume/{session_id}")
-async def get_volume(session_id: str):
-    """
-    Возвращает FLAIR-объём из .npy файла (сохранённого при /predict).
-    Формат: { shape:[D,H,W], spacing:[1,1,1], data:[uint8,...] }
-    """
-    import numpy as np
-
-    npy_path = os.path.join(OUTPUT_DIR, f"{session_id}_flair.npy")
-    if not os.path.exists(npy_path):
-        raise HTTPException(status_code=404, detail="Данные объёма не найдены. Запустите анализ заново.")
-
-    data = np.load(npy_path).astype(np.float32)  # shape: (D, H, W)
-    D, H, W = data.shape
-
-    mn, mx = data.min(), data.max()
-    norm = ((data - mn) / (mx - mn + 1e-9) * 255).astype(np.uint8)
-
-    # Удаляем .npy после отдачи — он больше не нужен
-    try:
-        os.remove(npy_path)
-    except OSError:
-        pass
-
+def health() -> dict:
     return {
-        "shape":   [int(D), int(H), int(W)],
-        "spacing": [1.0, 1.0, 1.0],
-        "data":    norm.flatten().tolist()
+        "status": "ok",
+        "device": str(
+            get_model().outc.weight.device
+        ),
     }
 
 
-@app.post("/predict")
+@app.get(
+    "/glb/{session_id}",
+)
+def get_glb(
+    session_id: str,
+) -> FileResponse:
+    path = glb_path(session_id)
+
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="GLB-файл не найден.",
+        )
+
+    return FileResponse(
+        path=str(path),
+        media_type="model/gltf-binary",
+        filename="tumor_reconstruction.glb",
+    )
+
+
+@app.get(
+    "/volume/{session_id}",
+)
+def get_volume(
+    session_id: str,
+) -> dict:
+    path = volume_path(session_id)
+
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="FLAIR-объём не найден.",
+        )
+
+    data = np.load(path).astype(
+        np.float32
+    )
+
+    minimum = float(data.min())
+    maximum = float(data.max())
+
+    if maximum > minimum:
+        normalized = (
+            (data - minimum)
+            / (maximum - minimum)
+            * 255.0
+        ).astype(np.uint8)
+    else:
+        normalized = np.zeros_like(
+            data,
+            dtype=np.uint8,
+        )
+
+    return {
+        "shape": [
+            int(value)
+            for value in normalized.shape
+        ],
+        "data": normalized.flatten().tolist(),
+    }
+
+
+@app.get(
+    "/metadata/{session_id}",
+)
+def get_metadata(
+    session_id: str,
+) -> dict:
+    path = metadata_path(session_id)
+
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Метаданные не найдены.",
+        )
+
+    with path.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        return json.load(file)
+
+
+@app.delete(
+    "/session/{session_id}",
+)
+def delete_session(
+    session_id: str,
+) -> dict:
+    paths = [
+        glb_path(session_id),
+        volume_path(session_id),
+        metadata_path(session_id),
+    ]
+
+    for path in paths:
+        try:
+            path.unlink(
+                missing_ok=True,
+            )
+        except OSError as exc:
+            logger.warning(
+                "Не удалось удалить %s: %s",
+                path,
+                exc,
+            )
+
+    return {
+        "status": "deleted",
+        "session_id": session_id,
+    }
+
+
+@app.post(
+    "/predict",
+)
 async def predict(
     flair: UploadFile = File(...),
     t1: UploadFile = File(...),
     t1ce: UploadFile = File(...),
-    t2: UploadFile = File(...)
-):
-    """
-    Основной endpoint сегментации.
+    t2: UploadFile = File(...),
+) -> JSONResponse:
+    session_id = str(
+        uuid.uuid4()
+    )
 
-    Принимает 4 файла:
-    - FLAIR
-    - T1
-    - T1ce
-    - T2
+    session_dir = (
+        TEMP_DIR / session_id
+    )
+    session_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    Сейчас поддерживаются:
-    - .nii
-    - .nii.gz
-    - .zip с DICOM-серией внутри
+    uploads = {
+        "flair": flair,
+        "t1": t1,
+        "t1ce": t1ce,
+        "t2": t2,
+    }
 
-    Возвращает:
-    - .glb файл с 3D-моделью мозга и опухоли
-    """
-
-    session_id = str(uuid.uuid4())
-    session_dir = os.path.join(TEMP_DIR, session_id)
-    os.makedirs(session_dir, exist_ok=True)
-
-    logger.info(f"Новая сессия обработки: {session_id}")
-
-    file_paths = {}
+    file_paths: dict[str, str] = {}
 
     try:
-        uploads = [
-            ("flair", flair),
-            ("t1", t1),
-            ("t1ce", t1ce),
-            ("t2", t2),
-        ]
+        for modality in MODALITIES:
+            upload = uploads[modality]
+            extension = extension_for_upload(
+                upload.filename
+            )
 
-        # ----------------------------------------------------
-        # 1. Сохраняем загруженные файлы во временную папку
-        # ----------------------------------------------------
+            path = session_dir / (
+                f"{modality}{extension}"
+            )
 
-        for name, upload in uploads:
-            ext = get_upload_extension(upload.filename)
-            path = os.path.join(session_dir, f"{name}{ext}")
+            save_upload_file(
+                upload,
+                path,
+            )
 
-            logger.info(f"Сохранение файла {name}: {upload.filename} -> {path}")
+            file_paths[modality] = str(path)
 
-            save_upload_file(upload, path)
-            file_paths[name] = path
-
-        logger.info(f"Все файлы сохранены для сессии {session_id}")
-
-        # ----------------------------------------------------
-        # 2. Запускаем инференс модели
-        # ----------------------------------------------------
-
-        logger.info(f"Запуск инференса для сессии {session_id}")
-
-        mask, affine, flair_raw = run_inference(
-            file_paths=file_paths,
-            session_dir=session_dir
+        mask, affine, flair_raw, spacing = (
+            run_inference(
+                file_paths=file_paths,
+                session_dir=str(session_dir),
+            )
         )
+
+        output_glb = glb_path(
+            session_id
+        )
+
+        build_glb(
+            pred_mask=mask,
+            flair_raw=flair_raw,
+            output_path=output_glb,
+        )
+
+        np.save(
+            volume_path(session_id),
+            flair_raw.astype(
+                np.float32
+            ),
+        )
+
+        class_voxels = calculate_class_voxels(
+            mask
+        )
+
+        metadata = {
+            "session_id": session_id,
+            "shape": [
+                int(value)
+                for value in mask.shape
+            ],
+            "spacing": [
+                float(value)
+                for value in spacing
+            ],
+            "modalities": list(
+                MODALITIES
+            ),
+            "classes": {
+                "0": "background",
+                "1": "necrosis",
+                "2": "edema",
+                "3": "enhancing",
+            },
+            "class_voxels": class_voxels,
+            "glb_url": (
+                f"/glb/{session_id}"
+            ),
+            "volume_url": (
+                f"/volume/{session_id}"
+            ),
+            "metadata_url": (
+                f"/metadata/{session_id}"
+            ),
+        }
+
+        with metadata_path(
+            session_id
+        ).open(
+            "w",
+            encoding="utf-8",
+        ) as file:
+            json.dump(
+                metadata,
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
 
         logger.info(
-            f"Инференс завершён для сессии {session_id}. "
-            f"Размер маски: {mask.shape}, voxels={int(mask.sum())}"
+            "Анализ завершён: %s",
+            session_id,
         )
 
-        # Сохраняем FLAIR в OUTPUT_DIR — он не удаляется в finally
-        import numpy as np
-        flair_npy_path = os.path.join(OUTPUT_DIR, f"{session_id}_flair.npy")
-        np.save(flair_npy_path, flair_raw.astype(np.float32))
-        logger.info(f"FLAIR сохранён для /volume/: {flair_npy_path}")
-
-        # ----------------------------------------------------
-        # 3. Строим 3D-модель GLB
-        # ----------------------------------------------------
-
-        output_path = os.path.join(OUTPUT_DIR, f"{session_id}.glb")
-
-        logger.info(f"Генерация GLB: {output_path}")
-
-        build_glb(mask, flair_raw, output_path)
-
-        if not os.path.exists(output_path):
-            raise RuntimeError("GLB-файл не был создан.")
-
-        file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-
-        logger.info(
-            f"GLB успешно создан для сессии {session_id}. "
-            f"Размер файла: {file_size_mb:.2f} MB"
+        return JSONResponse(
+            content=metadata,
+            headers={
+                "X-Session-Id": session_id,
+            },
         )
 
-        # ----------------------------------------------------
-        # 4. Возвращаем GLB во frontend
-        # ----------------------------------------------------
-
-        from starlette.background import BackgroundTask
-        resp = FileResponse(
-            output_path,
-            media_type="model/gltf-binary",
-            filename="tumor_reconstruction.glb"
+    except Exception as exc:
+        logger.error(
+            "Ошибка сессии %s: %s",
+            session_id,
+            exc,
         )
-        resp.headers["X-Session-Id"] = session_id
-        return resp
-
-    except Exception as e:
-        logger.error(f"Ошибка в сессии {session_id}: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(
+            traceback.format_exc()
+        )
 
         raise HTTPException(
             status_code=500,
-            detail=str(e)
-        )
+            detail=str(exc),
+        ) from exc
 
     finally:
-        # Удаляем только временную папку с входными файлами.
-        # output_path НЕ удаляем, потому что FileResponse должен успеть отдать GLB.
-        shutil.rmtree(session_dir, ignore_errors=True)
-        logger.info(f"Временная папка сессии удалена: {session_dir}")
-
+        shutil.rmtree(
+            session_dir,
+            ignore_errors=True,
+        )

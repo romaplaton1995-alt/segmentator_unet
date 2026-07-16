@@ -1,140 +1,417 @@
-import numpy as np
-from skimage import measure
-from scipy import ndimage
-import trimesh
+from __future__ import annotations
+
 import logging
+from pathlib import Path
+
+import numpy as np
+import trimesh
+from scipy import ndimage
+from skimage import measure
+
 
 logger = logging.getLogger("main")
 
 
-def extract_brain_mask(flair_volume, threshold_percentile=15):
-    """Извлекает маску мозга из FLAIR объема."""
-    nonzero = flair_volume[flair_volume != 0]
-    if nonzero.size == 0:
-        return np.zeros_like(flair_volume, dtype=np.uint8)
+COLORS = {
+    "brain": [200, 200, 200, 55],
+    "whole_tumor": [255, 80, 80, 110],
+    "tumor_core": [255, 120, 0, 150],
+    "necrosis": [255, 165, 0, 190],
+    "edema": [100, 180, 255, 100],
+    "enhancing": [255, 30, 30, 255],
+}
 
-    mask = flair_volume > np.percentile(nonzero, threshold_percentile)
-    mask = ndimage.binary_closing(mask, structure=np.ones((3, 3, 3)))
+
+def extract_brain_mask(
+    flair_volume: np.ndarray,
+    threshold_percentile: float = 15.0,
+) -> np.ndarray:
+    if flair_volume.ndim != 3:
+        raise ValueError(
+            "FLAIR должен иметь форму [D,H,W]."
+        )
+
+    nonzero = flair_volume[
+        np.isfinite(flair_volume)
+        & (flair_volume != 0)
+    ]
+
+    if nonzero.size == 0:
+        return np.zeros_like(
+            flair_volume,
+            dtype=np.uint8,
+        )
+
+    threshold = np.percentile(
+        nonzero,
+        threshold_percentile,
+    )
+
+    mask = (
+        np.isfinite(flair_volume)
+        & (flair_volume > threshold)
+    )
+
+    structure = np.ones(
+        (3, 3, 3),
+        dtype=bool,
+    )
+
+    mask = ndimage.binary_closing(
+        mask,
+        structure=structure,
+    )
+
     mask = ndimage.binary_fill_holes(mask)
 
-    labeled, num = ndimage.label(mask)
-    if num > 1:
-        sizes = ndimage.sum(mask, labeled, range(1, num + 1))
-        mask = labeled == (np.argmax(sizes) + 1)
+    labeled, count = ndimage.label(mask)
+
+    if count > 1:
+        sizes = ndimage.sum(
+            mask,
+            labeled,
+            range(1, count + 1),
+        )
+
+        largest_label = int(
+            np.argmax(sizes) + 1
+        )
+
+        mask = labeled == largest_label
 
     return mask.astype(np.uint8)
 
 
-def clean_tumor_mask(mask, min_size=10):  # УМЕНЬШИЛИ с 30/20/30 до 10
-    """Очищает маску опухоли, удаляя очень мелкие компоненты."""
-    labeled, num = ndimage.label(mask)
-    if num == 0:
-        return mask
+def clean_mask(
+    mask: np.ndarray,
+    min_size: int = 10,
+) -> np.ndarray:
+    binary = mask.astype(bool)
 
-    sizes = ndimage.sum(mask, labeled, range(1, num + 1))
-    keep = np.where(sizes >= min_size)[0] + 1
-    return np.isin(labeled, keep).astype(np.uint8)
+    if not binary.any():
+        return np.zeros_like(
+            binary,
+            dtype=np.uint8,
+        )
+
+    labeled, count = ndimage.label(
+        binary
+    )
+
+    if count == 0:
+        return np.zeros_like(
+            binary,
+            dtype=np.uint8,
+        )
+
+    sizes = ndimage.sum(
+        binary,
+        labeled,
+        range(1, count + 1),
+    )
+
+    keep_labels = (
+        np.where(
+            sizes >= min_size
+        )[0]
+        + 1
+    )
+
+    return np.isin(
+        labeled,
+        keep_labels,
+    ).astype(np.uint8)
 
 
-def mask_to_mesh(mask, level=0.5, step_size=1):
-    """Конвертирует бинарную маску в 3D меш."""
-    if mask.sum() == 0:
+def mask_to_mesh(
+    mask: np.ndarray,
+    *,
+    step_size: int = 1,
+) -> trimesh.Trimesh | None:
+    if mask.ndim != 3:
+        raise ValueError(
+            "Маска должна иметь форму [D,H,W]."
+        )
+
+    if int(mask.sum()) == 0:
         return None
+
+    padded = np.pad(
+        mask.astype(np.float32),
+        1,
+        mode="constant",
+    )
 
     try:
-        verts, faces, normals, _ = measure.marching_cubes(mask, level=level, step_size=step_size)
-        mesh = trimesh.Trimesh(vertices=verts, faces=faces, vertex_normals=normals)
-        # Исправляем нормали - они должны быть наружу
+        vertices, faces, normals, _ = (
+            measure.marching_cubes(
+                padded,
+                level=0.5,
+                step_size=step_size,
+            )
+        )
+
+        vertices -= 1.0
+
+        mesh = trimesh.Trimesh(
+            vertices=vertices,
+            faces=faces,
+            vertex_normals=normals,
+            process=True,
+        )
+
+        mesh.remove_unreferenced_vertices()
         mesh.fix_normals()
+
         return mesh
-    except Exception as e:
-        logger.error(f"Ошибка создания меша: {e}")
+
+    except Exception as exc:
+        logger.exception(
+            "Ошибка построения поверхности: %s",
+            exc,
+        )
         return None
 
 
-def safe_decimate(mesh, target_faces):
-    """Пытается уменьшить количество полигонов."""
+def smooth_mesh(
+    mesh: trimesh.Trimesh,
+    iterations: int = 1,
+) -> trimesh.Trimesh:
+    if iterations <= 0:
+        return mesh
+
+    try:
+        return trimesh.smoothing.filter_laplacian(
+            mesh,
+            iterations=iterations,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Сглаживание пропущено: %s",
+            exc,
+        )
+        return mesh
+
+
+def safe_decimate(
+    mesh: trimesh.Trimesh,
+    target_faces: int,
+) -> trimesh.Trimesh:
     if len(mesh.faces) <= target_faces:
         return mesh
 
     try:
-        return mesh.simplify_quadric_decimation(target_faces)
-    except ImportError:
-        logger.info(f"⚠️ Децимация пропущена (нет backend'а), меш останется с {len(mesh.faces)} гранями")
-        return mesh
-    except Exception as e:
-        logger.error(f"Ошибка децимации: {e}")
-        return mesh
+        simplified = mesh.simplify_quadric_decimation(
+            face_count=target_faces
+        )
+
+        if simplified is not None:
+            return simplified
+
+    except Exception as exc:
+        logger.warning(
+            "Децимация пропущена: %s",
+            exc,
+        )
+
+    return mesh
 
 
-def build_glb(pred_mask, flair_raw, output_path):
-    """
-    Строит GLB файл с 3D моделью мозга и опухоли.
-    """
-    brain_mask = extract_brain_mask(flair_raw)
+def set_mesh_color(
+    mesh: trimesh.Trimesh,
+    color: list[int],
+) -> None:
+    mesh.visual.face_colors = np.tile(
+        np.asarray(
+            color,
+            dtype=np.uint8,
+        ),
+        (len(mesh.faces), 1),
+    )
 
-    # Маски для каждого класса
-    necrosis_mask = (pred_mask == 1).astype(np.uint8)
-    edema_mask = (pred_mask == 2).astype(np.uint8)
-    enhancing_mask = (pred_mask == 3).astype(np.uint8)
 
-    logger.info(f"Класс 1 (некроз): {necrosis_mask.sum()} вокселей")
-    logger.info(f"Класс 2 (отёк): {edema_mask.sum()} вокселей")
-    logger.info(f"Класс 3 (активная опухоль): {enhancing_mask.sum()} вокселей")
+def add_mesh(
+    scene: trimesh.Scene,
+    mesh: trimesh.Trimesh | None,
+    *,
+    name: str,
+    color: list[int],
+    target_faces: int,
+    smooth_iterations: int = 1,
+) -> None:
+    if mesh is None:
+        return
 
-    # Очистка с меньшим min_size
-    necrosis_mask = clean_tumor_mask(necrosis_mask, min_size=10)
-    edema_mask = clean_tumor_mask(edema_mask, min_size=10)
-    enhancing_mask = clean_tumor_mask(enhancing_mask, min_size=10)
+    mesh = smooth_mesh(
+        mesh,
+        iterations=smooth_iterations,
+    )
+
+    mesh = safe_decimate(
+        mesh,
+        target_faces=target_faces,
+    )
+
+    set_mesh_color(
+        mesh,
+        color,
+    )
+
+    scene.add_geometry(
+        mesh,
+        node_name=name,
+        geom_name=name,
+    )
 
     logger.info(
-        f"После очистки - некроз: {necrosis_mask.sum()}, отёк: {edema_mask.sum()}, активная опухоль: {enhancing_mask.sum()}")
+        "Добавлен меш %s: vertices=%d, faces=%d",
+        name,
+        len(mesh.vertices),
+        len(mesh.faces),
+    )
 
-    # Создаём меши
-    brain_mesh = mask_to_mesh(brain_mask, step_size=2)
-    necrosis_mesh = mask_to_mesh(necrosis_mask, step_size=1)
-    edema_mesh = mask_to_mesh(edema_mask, step_size=1)
-    enhancing_mesh = mask_to_mesh(enhancing_mask, step_size=1)
 
-    # Создаём сцену с явными именами
+def build_glb(
+    pred_mask: np.ndarray,
+    flair_raw: np.ndarray,
+    output_path: str | Path,
+) -> str:
+    if pred_mask.shape != flair_raw.shape:
+        raise ValueError(
+            "Размеры prediction и FLAIR не совпадают: "
+            f"{pred_mask.shape} != {flair_raw.shape}"
+        )
+
+    pred_mask = pred_mask.astype(
+        np.uint8,
+        copy=False,
+    )
+
+    brain_mask = extract_brain_mask(
+        flair_raw
+    )
+
+    masks = {
+        "brain": brain_mask,
+        "whole_tumor": clean_mask(
+            pred_mask > 0,
+            min_size=20,
+        ),
+        "tumor_core": clean_mask(
+            np.isin(pred_mask, [1, 3]),
+            min_size=10,
+        ),
+        "necrosis": clean_mask(
+            pred_mask == 1,
+            min_size=10,
+        ),
+        "edema": clean_mask(
+            pred_mask == 2,
+            min_size=10,
+        ),
+        "enhancing": clean_mask(
+            pred_mask == 3,
+            min_size=10,
+        ),
+    }
+
+    for name, mask in masks.items():
+        logger.info(
+            "%s: %d voxels",
+            name,
+            int(mask.sum()),
+        )
+
     scene = trimesh.Scene()
 
-    # 1. Мозг (полупрозрачный серый) - рендерится ПЕРВЫМ
-    if brain_mesh is not None:
-        brain_mesh = trimesh.smoothing.filter_laplacian(brain_mesh, iterations=5)
-        brain_mesh = safe_decimate(brain_mesh, 50000)
-        brain_mesh.visual.face_colors = [200, 200, 200, 60]  # Полупрозрачный
-        scene.add_geometry(brain_mesh, node_name='brain', geom_name='brain')
-        logger.info("Добавлен меш: мозг")
+    add_mesh(
+        scene,
+        mask_to_mesh(
+            masks["brain"],
+            step_size=2,
+        ),
+        name="brain",
+        color=COLORS["brain"],
+        target_faces=50000,
+        smooth_iterations=1,
+    )
 
-    # 2. Отёк (голубой, очень прозрачный) - рендерится ВТОРЫМ
-    if edema_mesh is not None:
-        edema_mesh = trimesh.smoothing.filter_laplacian(edema_mesh, iterations=3)
-        edema_mesh = safe_decimate(edema_mesh, 30000)
-        edema_mesh.visual.face_colors = [100, 180, 255, 80]  # Более прозрачный
-        scene.add_geometry(edema_mesh, node_name='edema', geom_name='edema')
-        logger.info("Добавлен меш: отёк")
+    add_mesh(
+        scene,
+        mask_to_mesh(
+            masks["whole_tumor"],
+            step_size=1,
+        ),
+        name="whole_tumor",
+        color=COLORS["whole_tumor"],
+        target_faces=30000,
+        smooth_iterations=1,
+    )
 
-    # 3. Некроз (оранжевый, средняя прозрачность) - рендерится ТРЕТЬИМ
-    if necrosis_mesh is not None:
-        necrosis_mesh = trimesh.smoothing.filter_laplacian(necrosis_mesh, iterations=3)
-        necrosis_mesh = safe_decimate(necrosis_mesh, 15000)
-        necrosis_mesh.visual.face_colors = [255, 165, 0, 180]  # Менее прозрачный
-        scene.add_geometry(necrosis_mesh, node_name='necrosis', geom_name='necrosis')
-        logger.info("Добавлен меш: некроз")
+    add_mesh(
+        scene,
+        mask_to_mesh(
+            masks["tumor_core"],
+            step_size=1,
+        ),
+        name="tumor_core",
+        color=COLORS["tumor_core"],
+        target_faces=20000,
+        smooth_iterations=1,
+    )
 
-    # 4. Активная опухоль (ярко-красный, непрозрачный) - рендерится ПОСЛЕДНИМ
-    if enhancing_mesh is not None:
-        enhancing_mesh = trimesh.smoothing.filter_laplacian(enhancing_mesh, iterations=3)
-        enhancing_mesh = safe_decimate(enhancing_mesh, 10000)
-        enhancing_mesh.visual.face_colors = [255, 30, 30, 255]  # Непрозрачный
-        scene.add_geometry(enhancing_mesh, node_name='enhancing', geom_name='enhancing')
-        logger.info("Добавлен меш: активная опухоль")
+    add_mesh(
+        scene,
+        mask_to_mesh(
+            masks["edema"],
+            step_size=1,
+        ),
+        name="edema",
+        color=COLORS["edema"],
+        target_faces=20000,
+        smooth_iterations=1,
+    )
+
+    add_mesh(
+        scene,
+        mask_to_mesh(
+            masks["necrosis"],
+            step_size=1,
+        ),
+        name="necrosis",
+        color=COLORS["necrosis"],
+        target_faces=15000,
+        smooth_iterations=1,
+    )
+
+    add_mesh(
+        scene,
+        mask_to_mesh(
+            masks["enhancing"],
+            step_size=1,
+        ),
+        name="enhancing",
+        color=COLORS["enhancing"],
+        target_faces=10000,
+        smooth_iterations=1,
+    )
 
     if len(scene.geometry) == 0:
-        raise ValueError("Не удалось построить ни одного меша — маски пустые")
+        raise ValueError(
+            "Не удалось построить ни одного меша."
+        )
 
-    scene.export(output_path)
-    logger.info(f"GLB экспортирован: {output_path}")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    return output_path
+    scene.export(str(output_path))
+
+    logger.info(
+        "GLB экспортирован: %s",
+        output_path,
+    )
+
+    return str(output_path)

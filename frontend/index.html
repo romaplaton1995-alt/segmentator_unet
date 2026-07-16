@@ -1,332 +1,991 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="UTF-8">
-<title>BraTS 3D Viewer — Deep Slicing</title>
-<style>
-  body { margin: 0; background: #f4f6f8; color: #222; font-family: sans-serif; overflow: hidden; }
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D-сегментация опухоли мозга</title>
 
-  #upload-panel {
-    position: absolute; top: 15px; left: 15px; z-index: 100;
-    background: rgba(255, 255, 255, 0.96); padding: 18px;
-    border-radius: 12px; border: 1px solid #d5dbe3;
-    width: 280px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-  }
+    <style>
+        :root {
+            color-scheme: dark;
+            --background: #11151b;
+            --panel: #1b222c;
+            --panel-light: #252e3a;
+            --text: #e9eef5;
+            --muted: #9da9b8;
+            --accent: #50a8ff;
+            --danger: #ff5e68;
+            --border: #344252;
+        }
 
-  input[type="file"] { display: block; margin: 8px 0; width: 100%; font-size: 11px; }
+        * {
+            box-sizing: border-box;
+        }
 
-  button {
-    padding: 10px; width: 100%; cursor: pointer; background: #2563eb;
-    color: white; border: none; border-radius: 6px; font-weight: bold; margin-bottom: 8px; font-size: 13px;
-  }
-  button:hover { background: #1d4ed8; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: var(--background);
+            color: var(--text);
+            font-family: Arial, sans-serif;
+        }
 
-  #status { margin-top: 12px; font-size: 11px; color: #444; line-height: 1.4; }
+        header {
+            padding: 18px 24px;
+            border-bottom: 1px solid var(--border);
+            background: #151b23;
+        }
 
-  .control-group { margin-top: 12px; padding-top: 10px; border-top: 1px solid #d5dbe3; }
-  .control-group label { display: block; font-size: 11px; margin-bottom: 4px; cursor: pointer; font-weight: 500; }
+        header h1 {
+            margin: 0;
+            font-size: 24px;
+        }
 
-  #slice-panel {
-    position: absolute; top: 15px; right: 15px; z-index: 100;
-    background: rgba(255,255,255,0.96); padding: 12px;
-    border-radius: 12px; border: 1px solid #d5dbe3;
-    width: 190px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-    display: none; flex-direction: column; gap: 8px;
-    max-height: 95vh;
-  }
+        header p {
+            margin: 7px 0 0;
+            color: var(--muted);
+        }
 
-  .slice-title { font-size: 11px; font-weight: bold; color: #2563eb; text-transform: uppercase; text-align: center; }
+        main {
+            display: grid;
+            grid-template-columns: 330px minmax(0, 1fr);
+            gap: 16px;
+            padding: 16px;
+            overflow: auto;
+        }
 
-  .slice-wrap {
-    position: relative; width: 170px; height: 170px;
-    background: #000; border-radius: 6px; overflow: hidden;
-    border: 1px solid #ddd; margin: 0 auto;
-  }
-  .slice-wrap canvas { width: 170px; height: 170px; display: block; }
-  .axis-label { font-size: 9px; color: #888; text-align: center; margin-bottom: 4px; text-transform: uppercase; }
+        .sidebar,
+        .content-panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+        }
 
-  .class-legend {
-    margin-top: 10px;
-    padding: 8px;
-    background: #f8f9fa;
-    border-radius: 6px;
-    font-size: 10px;
-  }
-  .class-item {
-    display: flex;
-    align-items: center;
-    margin: 4px 0;
-  }
-  .class-color {
-    width: 12px;
-    height: 12px;
-    border-radius: 3px;
-    margin-right: 8px;
-    border: 1px solid #999;
-  }
-</style>
+        .sidebar {
+            padding: 16px;
+        }
+
+        .content-panel {
+            padding: 12px;
+        }
+
+        .group {
+            margin-bottom: 18px;
+        }
+
+        .group h2 {
+            margin: 0 0 10px;
+            font-size: 16px;
+        }
+
+        label.file-label {
+            display: block;
+            margin: 9px 0;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        input[type="file"] {
+            width: 100%;
+            margin-top: 5px;
+        }
+
+        button {
+            width: 100%;
+            padding: 11px 14px;
+            border: 0;
+            border-radius: 7px;
+            background: var(--accent);
+            color: #06111e;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.secondary {
+            margin-top: 8px;
+            background: var(--panel-light);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .status {
+            min-height: 22px;
+            margin-top: 10px;
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.4;
+        }
+
+        .status.error {
+            color: var(--danger);
+        }
+
+        .viewer-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 12px;
+        }
+
+        .viewer {
+            height: 48vh;
+            min-height: 300px;
+            position: relative;
+            overflow: hidden;
+            background: #080b0f;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+
+        #three-viewer {
+            height: 65vh;
+            min-height: 400px;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        .slices {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+            height: 100%;
+        }
+
+        .slice-panel {
+            background: #080b0f;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 6px;
+            aspect-ratio: 1 / 1;
+            overflow: hidden;
+        }
+
+        .slice-panel h3 {
+            margin: 0 0 5px;
+            text-align: center;
+            font-size: 13px;
+            color: var(--muted);
+        }
+
+        .slice-panel canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            image-rendering: pixelated;
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px 14px;
+            padding: 10px;
+            background: var(--panel-light);
+            border-radius: 8px;
+            margin-bottom: 12px;
+        }
+
+        .control-row {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            min-height: 26px;
+            font-size: 13px;
+        }
+
+        .control-row input[type="range"] {
+            width: 100%;
+        }
+
+        .metadata {
+            margin-top: 12px;
+            padding: 12px;
+            background: var(--panel-light);
+            border-radius: 8px;
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .metrics {
+            margin-top: 8px;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 5px 12px;
+        }
+
+        .notice {
+            margin-top: 16px;
+            color: #d7b97a;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        @media (max-width: 1000px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+
+            .viewer-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 620px) {
+            .slices {
+                grid-template-columns: 1fr;
+            }
+
+            .controls {
+                grid-template-columns: 1fr;
+            }
+        }
+
+    </style>
 </head>
+
 <body>
+<header>
+    <h1>Анализ опухоли головного мозга</h1>
+    <p>Многоклассовая сегментация 3D MRI с визуализацией результата</p>
+</header>
 
-<div id="upload-panel">
-  <div style="font-weight: bold; margin-bottom: 10px; color: #2563eb; font-size: 14px;">АНАЛИЗ ОПУХОЛИ</div>
-  <label>FLAIR <input type="file" id="flair"></label>
-  <label>T1 <input type="file" id="t1"></label>
-  <label>T1ce <input type="file" id="t1ce"></label>
-  <label>T2 <input type="file" id="t2"></label>
+<main>
+    <aside class="sidebar">
+        <div class="group">
+            <h2>Загрузка NIfTI</h2>
 
-  <button onclick="runPrediction()">НАЧАТЬ АНАЛИЗ</button>
+            <label class="file-label">
+                FLAIR
+                <input id="flair-file" type="file" accept=".nii,.nii.gz">
+            </label>
 
-  <div class="class-legend">
-    <div class="class-item"><div class="class-color" style="background: #c8c8c8;"></div>Мозг</div>
-    <div class="class-item"><div class="class-color" style="background: #64b4ff;"></div>Отёк (класс 2)</div>
-    <div class="class-item"><div class="class-color" style="background: #ffa500;"></div>Некроз (класс 1)</div>
-    <div class="class-item"><div class="class-color" style="background: #ff1e1e;"></div>Активная опухоль (класс 3)</div>
-  </div>
+            <label class="file-label">
+                T1
+                <input id="t1-file" type="file" accept=".nii,.nii.gz">
+            </label>
 
-  <div class="control-group">
-    <label><input type="checkbox" id="clipEnabledX" checked> X Сагиттальный</label>
-    <input type="range" id="clipSliderX" style="width:100%;">
+            <label class="file-label">
+                T1ce
+                <input id="t1ce-file" type="file" accept=".nii,.nii.gz">
+            </label>
 
-    <label style="margin-top:8px;"><input type="checkbox" id="clipEnabledY" checked> Y Фронтальный</label>
-    <input type="range" id="clipSliderY" style="width:100%;">
+            <label class="file-label">
+                T2
+                <input id="t2-file" type="file" accept=".nii,.nii.gz">
+            </label>
 
-    <label style="margin-top:8px;"><input type="checkbox" id="clipEnabledZ" checked> Z Аксиальный</label>
-    <input type="range" id="clipSliderZ" style="width:100%;">
-  </div>
+            <button id="analyze-button">
+                Начать анализ
+            </button>
 
-  <div class="control-group">
-    <label>Масштаб: <span id="scaleValue">1.00</span>&times;</label>
-    <input type="range" id="scaleSlider" min="0.5" max="2.5" step="0.01" value="1.0" style="width:100%;">
-  </div>
+            <button id="clear-button" class="secondary">
+                Очистить результат
+            </button>
 
-  <div id="status">Загрузите NIfTI файлы...</div>
-</div>
+            <div id="status" class="status"></div>
+        </div>
 
-<div id="slice-panel">
-  <div class="slice-title">Срезы (мм)</div>
-  <div class="slice-wrap"><canvas id="mesh3dX"></canvas></div>
-  <div class="axis-label">Сагиттальный (X)</div>
-  <div class="slice-wrap"><canvas id="mesh3dY"></canvas></div>
-  <div class="axis-label">Фронтальный (Y)</div>
-  <div class="slice-wrap"><canvas id="mesh3dZ"></canvas></div>
-  <div class="axis-label">Аксиальный (Z)</div>
-</div>
+        <div class="group">
+            <h2>Слои 3D-модели</h2>
+
+            <label class="control-row">
+                <input id="show-brain" type="checkbox" checked>
+                Мозг
+            </label>
+
+            <label class="control-row">
+                <input id="show-whole-tumor" type="checkbox" checked>
+                Вся опухоль
+            </label>
+
+            <label class="control-row">
+                <input id="show-tumor-core" type="checkbox" checked>
+                Ядро опухоли
+            </label>
+
+            <label class="control-row">
+                <input id="show-edema" type="checkbox" checked>
+                Отёк
+            </label>
+
+            <label class="control-row">
+                <input id="show-necrosis" type="checkbox" checked>
+                Некроз
+            </label>
+
+            <label class="control-row">
+                <input id="show-enhancing" type="checkbox" checked>
+                Активная опухоль
+            </label>
+
+            <label class="control-row">
+                Opacity мозга
+                <input id="brain-opacity" type="range" min="0" max="1" step="0.05" value="0.22">
+            </label>
+        </div>
+
+        <div id="metadata" class="metadata">
+            Результаты анализа появятся здесь.
+        </div>
+
+        <div class="notice">
+            Результат предназначен для исследовательской визуализации и не заменяет заключение врача.
+        </div>
+    </aside>
+
+    <section class="content-panel">
+        <div class="controls">
+            <label class="control-row">
+                <input id="slice-sagittal" type="checkbox" checked>
+                Сагиттальный
+            </label>
+
+            <label class="control-row">
+                <input id="slice-coronal" type="checkbox" checked>
+                Фронтальный
+            </label>
+
+            <label class="control-row">
+                <input id="slice-axial" type="checkbox" checked>
+                Аксиальный
+            </label>
+
+            <label class="control-row">
+                Масштаб
+                <input id="scale-range" type="range" min="0.5" max="2.5" step="0.05" value="1">
+            </label>
+        </div>
+
+        <div class="viewer-grid">
+            <div id="three-viewer" class="viewer"></div>
+
+            <div class="slices">
+                <div class="slice-panel">
+                    <h3>Сагиттальный X</h3>
+                    <canvas id="sagittal-canvas"></canvas>
+                </div>
+
+                <div class="slice-panel">
+                    <h3>Фронтальный Y</h3>
+                    <canvas id="coronal-canvas"></canvas>
+                </div>
+
+                <div class="slice-panel">
+                    <h3>Аксиальный Z</h3>
+                    <canvas id="axial-canvas"></canvas>
+                </div>
+            </div>
+        </div>
+    </section>
+</main>
 
 <script type="importmap">
 {
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.164.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.0/examples/jsm/"
-  }
+    "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
 }
 </script>
 
+
 <script type="module">
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
-let brainGroup = null, modelSize = null;
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xf4f6f8);
 
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 5000);
-camera.position.set(250, 250, 250);
+    const API_BASE = "http://localhost:8000";
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.localClippingEnabled = true;
-renderer.sortObjects = true;
-document.body.appendChild(renderer.domElement);
+    const COLORS = {
+        brain: 0xc8c8c8,
+        whole_tumor: 0xff5050,
+        tumor_core: 0xff7800,
+        edema: 0x64b4ff,
+        necrosis: 0xffa500,
+        enhancing: 0xff1e1e
+    };
 
-const offRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-offRenderer.setSize(400, 400);
-offRenderer.localClippingEnabled = true;
+    const state = {
+        sessionId: null,
+        volume: null,
+        shape: null,
+        gltf: null,
+        objectByName: new Map()
+    };
 
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
+    const elements = {
+        status: document.getElementById("status"),
+        metadata: document.getElementById("metadata"),
+        analyze: document.getElementById("analyze-button"),
+        clear: document.getElementById("clear-button"),
+        brainOpacity: document.getElementById("brain-opacity"),
+        scale: document.getElementById("scale-range")
+    };
 
-scene.add(new THREE.AmbientLight(0xffffff, 1.2));
-const light = new THREE.DirectionalLight(0xffffff, 0.8);
-light.position.set(1, 1, 1);
-scene.add(light);
+    const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true
+    });
 
-const clipPlanes = [
-  new THREE.Plane(new THREE.Vector3(1, 0, 0), 0),
-  new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
-  new THREE.Plane(new THREE.Vector3(0, 0, 1), 0)
-];
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(
+        document.getElementById("three-viewer").clientWidth,
+        document.getElementById("three-viewer").clientHeight
+    );
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-const slicePlanes = [
-  new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0),
-  new THREE.Plane(new THREE.Vector3(0, -1, 0), 0),
-  new THREE.Plane(new THREE.Vector3(0, 0, -1), 0)
-];
+    document.getElementById("three-viewer").appendChild(renderer.domElement);
 
-function getActivePlanes() {
-  const p = [];
-  if (document.getElementById('clipEnabledX').checked) p.push(clipPlanes[0]);
-  if (document.getElementById('clipEnabledY').checked) p.push(clipPlanes[1]);
-  if (document.getElementById('clipEnabledZ').checked) p.push(clipPlanes[2]);
-  return p;
-}
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x080b0f);
 
-// Цветовая схема для разных типов мешей
-// renderOrder гарантирует правильный порядок отрисовки прозрачных объектов
-const MESH_CONFIG = {
-  'brain':     { color: 0xc8c8c8, transparent: true,  opacity: 0.25, depthWrite: false, renderOrder: 0 },
-  'edema':     { color: 0x64b4ff, transparent: true,  opacity: 0.5,  depthWrite: false, renderOrder: 1 },
-  'necrosis':  { color: 0xffa500, transparent: true,  opacity: 0.8,  depthWrite: false, renderOrder: 2 },
-  'enhancing': { color: 0xff1e1e, transparent: false, opacity: 1.0,  depthWrite: true,  renderOrder: 3 }
-};
+    const camera = new THREE.PerspectiveCamera(
+        45,
+        1,
+        0.1,
+        10000
+    );
 
-window.runPrediction = async function() {
-  const status = document.getElementById('status');
-  const fd = new FormData();
-  ['flair','t1','t1ce','t2'].forEach(id => {
-    const f = document.getElementById(id).files[0];
-    if(f) fd.append(id, f);
-  });
+    camera.position.set(260, 220, 260);
 
-  if (fd.keys().next().done) {
-    status.innerHTML = "<span style='color:orange;'>⚠️ Выберите файлы</span>";
-    return;
-  }
+    const controls = new OrbitControls(
+        camera,
+        renderer.domElement
+    );
 
-  status.innerHTML = "<span style='color:#2563eb;'>⏳ Анализ...</span>";
-  try {
-    const res = await fetch("http://localhost:8000/predict", { method: "POST", body: fd });
-    const url = URL.createObjectURL(await res.blob());
+    controls.enableDamping = true;
 
-    new GLTFLoader().load(url, (gltf) => {
-      if(brainGroup) scene.remove(brainGroup);
-      const model = gltf.scene;
-      let meshes = [];
-      model.traverse(n => { if(n.isMesh) meshes.push(n); });
+    scene.add(
+        new THREE.HemisphereLight(
+            0xffffff,
+            0x222222,
+            2.0
+        )
+    );
 
-      console.log(`Загружено ${meshes.length} мешей`);
+    const directionalLight = new THREE.DirectionalLight(
+        0xffffff,
+        2.0
+    );
 
-      // Применяем материалы на основе имени узла из GLB
-      meshes.forEach((mesh) => {
-        const meshName = (mesh.name || '').toLowerCase();
-        console.log(`Меш: имя="${meshName}", вершин=${mesh.geometry.attributes.position.count}`);
+    directionalLight.position.set(
+        300,
+        400,
+        300
+    );
 
-        const config = MESH_CONFIG[meshName] || {
-          color: 0x888888, transparent: true, opacity: 0.5,
-          depthWrite: false, renderOrder: 99
+    scene.add(directionalLight);
+
+    const modelGroup = new THREE.Group();
+    scene.add(modelGroup);
+
+    function setStatus(message, isError = false) {
+        elements.status.textContent = message;
+        elements.status.classList.toggle("error", isError);
+    }
+
+    function disposeObject(object) {
+        object.traverse((node) => {
+            if (node.geometry) {
+                node.geometry.dispose();
+            }
+
+            if (node.material) {
+                const materials = Array.isArray(node.material)
+                    ? node.material
+                    : [node.material];
+
+                materials.forEach((material) => {
+                    material.dispose();
+                });
+            }
+        });
+    }
+
+    function clearModel() {
+        while (modelGroup.children.length > 0) {
+            const object = modelGroup.children[0];
+            modelGroup.remove(object);
+            disposeObject(object);
+        }
+
+        state.gltf = null;
+        state.objectByName.clear();
+    }
+
+    function fitCameraToObject(object) {
+        const box = new THREE.Box3().setFromObject(object);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+
+        const maxSize = Math.max(
+            size.x,
+            size.y,
+            size.z
+        );
+
+        if (!Number.isFinite(maxSize) || maxSize <= 0) {
+            return;
+        }
+
+        const distance = maxSize * 2.2;
+
+        camera.position.set(
+            center.x + distance,
+            center.y + distance * 0.75,
+            center.z + distance
+        );
+
+        camera.near = Math.max(
+            0.1,
+            maxSize / 1000
+        );
+
+        camera.far = Math.max(
+            1000,
+            maxSize * 20
+        );
+
+        camera.updateProjectionMatrix();
+        controls.target.copy(center);
+        controls.update();
+    }
+
+    function updateVisibility() {
+        const mapping = {
+            "show-brain": "brain",
+            "show-whole-tumor": "whole_tumor",
+            "show-tumor-core": "tumor_core",
+            "show-edema": "edema",
+            "show-necrosis": "necrosis",
+            "show-enhancing": "enhancing"
         };
 
-        mesh.material = new THREE.MeshStandardMaterial({
-          color: config.color,
-          transparent: config.transparent,
-          opacity: config.opacity,
-          depthWrite: config.depthWrite,
-          depthTest: true,
-          renderOrder: config.renderOrder,
-          side: THREE.DoubleSide,
-          clippingPlanes: getActivePlanes()
+        Object.entries(mapping).forEach(([controlId, objectName]) => {
+            const visible = document.getElementById(controlId).checked;
+            const object = state.objectByName.get(objectName);
+
+            if (object) {
+                object.visible = visible;
+            }
         });
-      });
-
-      const box = new THREE.Box3().setFromObject(model);
-      modelSize = box.getSize(new THREE.Vector3());
-      model.position.sub(box.getCenter(new THREE.Vector3()));
-
-      brainGroup = new THREE.Group();
-      brainGroup.add(model);
-      scene.add(brainGroup);
-
-      const axes = ['X','Y','Z'];
-      const dims = [modelSize.x, modelSize.y, modelSize.z];
-      axes.forEach((ax, i) => {
-        const s = document.getElementById('clipSlider' + ax);
-        const half = dims[i]/2;
-        s.min = -half; s.max = half; s.value = 0;
-        clipPlanes[i].constant = 0;
-        slicePlanes[i].constant = 0;
-      });
-
-      document.getElementById('slice-panel').style.display = "flex";
-      status.innerHTML = "✅ Готово. Размер: " + modelSize.x.toFixed(0) + "мм<br>" +
-                        "<small>Мешей: " + meshes.length + "</small>";
-      axes.forEach(renderMesh3D);
-    });
-  } catch (e) {
-    status.innerHTML = "<span style='color:red;'>❌ Ошибка: " + e.message + "</span>";
-    console.error(e);
-  }
-};
-
-function renderMesh3D(axis) {
-  if (!brainGroup || !modelSize) return;
-  const canvas = document.getElementById('mesh3d' + axis);
-  const ctx = canvas.getContext('2d');
-  const idx = axis === 'X' ? 0 : axis === 'Y' ? 1 : 2;
-  const val = parseFloat(document.getElementById('clipSlider' + axis).value);
-
-  const states = [];
-  scene.traverse(n => {
-    if (n.isMesh) {
-      states.push({ m: n, t: n.material.transparent, o: n.material.opacity, cp: n.material.clippingPlanes });
-      n.material.transparent = false;
-      n.material.opacity = 1.0;
-      n.material.clippingPlanes = [slicePlanes[idx]];
     }
-  });
 
-  const zoom = Math.max(modelSize.x, modelSize.y, modelSize.z) * 0.55;
-  const cam = new THREE.OrthographicCamera(-zoom, zoom, zoom, -zoom, 0.1, 1000);
+    function updateMaterials() {
+        const brainOpacity = Number(
+            elements.brainOpacity.value
+        );
 
-  const offset = 0.5;
-  if (axis === 'X') { cam.position.set(val + offset, 0, 0); cam.lookAt(val - 100, 0, 0); }
-  else if (axis === 'Y') { cam.position.set(0, val + offset, 0); cam.lookAt(0, val - 100, 0); cam.up.set(0,0,1); }
-  else { cam.position.set(0, 0, val + offset); cam.lookAt(0, 0, val - 100); }
+        state.objectByName.forEach((object, name) => {
+            object.traverse((node) => {
+                if (!node.material) {
+                    return;
+                }
 
-  offRenderer.setClearColor(0x111111);
-  offRenderer.render(scene, cam);
+                const materials = Array.isArray(node.material)
+                    ? node.material
+                    : [node.material];
 
-  states.forEach(s => {
-    s.m.material.transparent = s.t;
-    s.m.material.opacity = s.o;
-    s.m.material.clippingPlanes = s.cp;
-  });
+                materials.forEach((material) => {
+                    material.transparent = true;
+                    material.depthWrite = name !== "brain";
 
-  ctx.drawImage(offRenderer.domElement, 0, 0, canvas.width, canvas.height);
-}
+                    if (name === "brain") {
+                        material.opacity = brainOpacity;
+                    }
+                });
+            });
+        });
+    }
 
-['X','Y','Z'].forEach((ax, i) => {
-  document.getElementById('clipSlider' + ax).oninput = (e) => {
-    const val = parseFloat(e.target.value);
-    clipPlanes[i].constant = val;
-    slicePlanes[i].constant = -val;
-    renderMesh3D(ax);
-  };
-  document.getElementById('clipEnabled' + ax).onchange = () => {
-    const p = getActivePlanes();
-    scene.traverse(n => { if(n.isMesh) n.material.clippingPlanes = p; });
-    renderMesh3D(ax);
-  };
-});
+    function registerModelObjects(root) {
+        root.traverse((node) => {
+            if (!node.isMesh) {
+                return;
+            }
 
-document.getElementById('scaleSlider').oninput = (e) => {
-  const v = parseFloat(e.target.value);
-  document.getElementById('scaleValue').innerText = v.toFixed(2);
-  if(brainGroup) brainGroup.scale.setScalar(v);
-};
+            const name = (
+                node.name
+                || node.parent?.name
+                || ""
+            ).toLowerCase();
 
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  renderer.render(scene, camera);
-}
-animate();
+            for (const key of Object.keys(COLORS)) {
+                if (name.includes(key)) {
+                    state.objectByName.set(key, node);
+                }
+            }
+        });
+    }
 
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+    function loadGlb(url) {
+        clearModel();
+
+        return new Promise((resolve, reject) => {
+            const loader = new GLTFLoader();
+
+            loader.load(
+                url,
+                (gltf) => {
+                    state.gltf = gltf;
+                    modelGroup.add(gltf.scene);
+                    registerModelObjects(gltf.scene);
+                    fitCameraToObject(gltf.scene);
+                    updateVisibility();
+                    updateMaterials();
+                    resolve(gltf);
+                },
+                undefined,
+                reject
+            );
+        });
+    }
+
+    function drawCanvas(canvas, values, width, height) {
+        if (!Array.isArray(values) || values.length !== width * height) {
+            throw new Error(
+                `Некорректные данные canvas: ожидалось ${width * height}, получено ${values?.length}`
+            );
+        }
+
+        const context = canvas.getContext("2d");
+
+        canvas.width = width;
+        canvas.height = height;
+
+        const imageData = context.createImageData(
+            width,
+            height
+        );
+
+        for (let index = 0; index < values.length; index++) {
+            const value = Number(values[index]) || 0;
+            const offset = index * 4;
+
+            imageData.data[offset] = value;
+            imageData.data[offset + 1] = value;
+            imageData.data[offset + 2] = value;
+            imageData.data[offset + 3] = 255;
+        }
+
+        context.putImageData(
+            imageData,
+            0,
+            0
+        );
+    }
+
+
+    function drawSlices() {
+        if (!state.volume || !state.shape) {
+            return;
+        }
+
+        const [depth, height, width] = state.shape;
+
+        const axialIndex = Math.floor(depth / 2);
+        const coronalIndex = Math.floor(height / 2);
+        const sagittalIndex = Math.floor(width / 2);
+
+        const axial = [];
+        const coronal = [];
+        const sagittal = [];
+
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                axial.push(
+                    state.volume[
+                        axialIndex * height * width
+                        + y * width
+                        + x
+                    ]
+                );
+            }
+        }
+
+        for (let z = 0; z < depth; z++) {
+            for (let x = 0; x < width; x++) {
+                coronal.push(
+                    state.volume[
+                        z * height * width
+                        + coronalIndex * width
+                        + x
+                    ]
+                );
+            }
+        }
+
+        for (let y = 0; y < height; y++) {
+            for (let z = 0; z < depth; z++) {
+                sagittal.push(
+                    state.volume[
+                        z * height * width
+                        + y * width
+                        + sagittalIndex
+                    ]
+                );
+            }
+        }
+
+        drawCanvas(
+            document.getElementById("axial-canvas"),
+            axial,
+            width,
+            height
+        );
+
+        drawCanvas(
+            document.getElementById("coronal-canvas"),
+            coronal,
+            width,
+            depth
+        );
+
+        drawCanvas(
+            document.getElementById("sagittal-canvas"),
+            sagittal,
+            height,
+            depth
+        );
+    }
+
+    async function loadVolume(url) {
+        const response = await fetch(
+            `${API_BASE}${url}`
+        );
+
+        if (!response.ok) {
+            throw new Error(
+                `Ошибка загрузки объёма: ${response.status}`
+            );
+        }
+
+        const payload = await response.json();
+
+        state.shape = payload.shape;
+        state.volume = payload.data;
+
+        drawSlices();
+    }
+
+    async function analyze() {
+        const files = {
+            flair: document.getElementById("flair-file").files[0],
+            t1: document.getElementById("t1-file").files[0],
+            t1ce: document.getElementById("t1ce-file").files[0],
+            t2: document.getElementById("t2-file").files[0]
+        };
+
+        if (Object.values(files).some((file) => !file)) {
+            setStatus(
+                "Выберите все четыре NIfTI-файла.",
+                true
+            );
+            return;
+        }
+
+        const formData = new FormData();
+
+        Object.entries(files).forEach(([name, file]) => {
+            formData.append(name, file);
+        });
+
+        elements.analyze.disabled = true;
+        setStatus("Выполняется инференс...");
+
+        try {
+            const response = await fetch(
+                `${API_BASE}/predict`,
+                {
+                    method: "POST",
+                    body: formData
+                }
+            );
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(
+                    errorText || `HTTP ${response.status}`
+                );
+            }
+
+            const metadata = await response.json();
+
+            state.sessionId = metadata.session_id;
+
+            elements.metadata.innerHTML = `
+                <strong>Сессия:</strong> ${metadata.session_id}<br>
+                <strong>Форма:</strong> ${metadata.shape.join(" × ")}<br>
+                <strong>Spacing:</strong> ${metadata.spacing.join(" × ")}<br>
+                <div class="metrics">
+                    <span>Некроз: ${metadata.class_voxels.necrosis}</span>
+                    <span>Отёк: ${metadata.class_voxels.edema}</span>
+                    <span>Активная опухоль: ${metadata.class_voxels.enhancing}</span>
+                    <span>Вся опухоль: ${metadata.class_voxels.whole_tumor}</span>
+                    <span>Ядро опухоли: ${metadata.class_voxels.tumor_core}</span>
+                </div>
+            `;
+
+            await loadGlb(
+                `${API_BASE}${metadata.glb_url}`
+            );
+
+            await loadVolume(
+                metadata.volume_url
+            );
+
+            setStatus(
+                "Анализ завершён."
+            );
+        } catch (error) {
+            console.error(error);
+            setStatus(
+                `Ошибка: ${error.message}`,
+                true
+            );
+        } finally {
+            elements.analyze.disabled = false;
+        }
+    }
+
+    async function clearResult() {
+        if (state.sessionId) {
+            try {
+                await fetch(
+                    `${API_BASE}/session/${state.sessionId}`,
+                    {
+                        method: "DELETE"
+                    }
+                );
+            } catch (error) {
+                console.warn(
+                    "Не удалось удалить сессию:",
+                    error
+                );
+            }
+        }
+
+        clearModel();
+
+        state.sessionId = null;
+        state.volume = null;
+        state.shape = null;
+
+        elements.metadata.textContent =
+            "Результаты анализа появятся здесь.";
+
+        setStatus("");
+    }
+
+    function resizeRenderer() {
+        const container = document.getElementById("three-viewer");
+
+        const minWidth = 300;
+        const minHeight = 200;
+
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+
+        renderer.setSize(
+            width,
+            height,
+            false
+        );
+
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+    }
+
+    function animationLoop() {
+        requestAnimationFrame(animationLoop);
+        controls.update();
+        renderer.render(
+            scene,
+            camera
+        );
+    }
+
+    elements.analyze.addEventListener(
+        "click",
+        analyze
+    );
+
+    elements.clear.addEventListener(
+        "click",
+        clearResult
+    );
+
+    elements.brainOpacity.addEventListener(
+        "input",
+        updateMaterials
+    );
+
+    elements.scale.addEventListener(
+        "input",
+        () => {
+            const scale = Number(
+                elements.scale.value
+            );
+            modelGroup.scale.setScalar(scale);
+        }
+    );
+
+    [
+        "show-brain",
+        "show-whole-tumor",
+        "show-tumor-core",
+        "show-edema",
+        "show-necrosis",
+        "show-enhancing"
+    ].forEach((id) => {
+        document.getElementById(id).addEventListener(
+            "change",
+            updateVisibility
+        );
+    });
+
+    [
+        "slice-sagittal",
+        "slice-coronal",
+        "slice-axial"
+    ].forEach((id) => {
+        document.getElementById(id).addEventListener(
+            "change",
+            () => {
+                const mapping = {
+                    "slice-sagittal": "sagittal-canvas",
+                    "slice-coronal": "coronal-canvas",
+                    "slice-axial": "axial-canvas"
+                };
+
+                const canvas = document.getElementById(
+                    mapping[id]
+                );
+
+                canvas.parentElement.style.display =
+                    document.getElementById(id).checked
+                        ? ""
+                        : "none";
+            }
+        );
+    });
+
+    window.addEventListener(
+        "resize",
+        resizeRenderer
+    );
+
+    resizeRenderer();
+    animationLoop();
 </script>
 </body>
 </html>

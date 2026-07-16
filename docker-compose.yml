@@ -4,6 +4,8 @@ services:
     container_name: brats_backend
     volumes:
       - ./weights:/app/weights:ro
+      - ./web_output:/app/output
+      - ./web_temp:/app/temp
     ports:
       - "8000:8000"
     deploy:

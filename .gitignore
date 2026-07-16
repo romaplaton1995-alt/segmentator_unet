@@ -45,9 +45,11 @@ weights/*.pth
 weights/*.pt
 weights/*.ckpt
 weights/*.onnx
+web_output/*
 
 # Keep weights folder structure
 !weights/.gitkeep
+!web_output/.gitkeep
 
 # Environment files
 .env
